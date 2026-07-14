@@ -302,7 +302,10 @@ def batch_move(body: BatchMoveBody, request: Request = None):
             _, target_numeric = decode_id(body.target_parent_id)
         except ValueError:
             target_numeric = int(body.target_parent_id)
-    cds.batch_move_typed([item.id for item in body.items], target_numeric)
+    try:
+        cds.batch_move_typed([item.id for item in body.items], target_numeric, user_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return {"success": True}
 
 
@@ -359,11 +362,10 @@ def batch_copy(body: BatchCopyBody, request: Request = None):
             _, target_num = decode_id(body.target_parent_id)
         except ValueError:
             target_num = int(body.target_parent_id)
-    ids = []
-    for item in body.items:
-        _, nid = decode_id(item.id)
-        ids.append(nid)
-    cds.batch_copy(ids, target_num, user_id)
+    try:
+        cds.batch_copy_typed([item.id for item in body.items], target_num, user_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return {"success": True}
 
 

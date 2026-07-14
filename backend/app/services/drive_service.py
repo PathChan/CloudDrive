@@ -1074,15 +1074,15 @@ def batch_move(file_ids: list[int], target_folder_id: int):
         move_file(file_id, target_folder_id)
 
 
-def batch_move_typed(compound_ids: list[str], target_folder_id: int):
+def batch_move_typed(compound_ids: list[str], target_folder_id: int, user_id: int = 0):
     """批量移动，接受复合ID列表，自动区分文件夹和文件"""
     from app.utils.id_utils import decode_id
     for cid in compound_ids:
         item_type, numeric_id = decode_id(cid)
         if item_type == "folder":
-            move_folder(numeric_id, target_folder_id, 0)
+            move_folder(numeric_id, target_folder_id, user_id)
         else:
-            move_file(numeric_id, target_folder_id)
+            move_file(numeric_id, target_folder_id, user_id)
 
 
 def copy_file(file_id: int, target_folder_id: int, user_id: int) -> int:
@@ -1101,13 +1101,65 @@ def copy_file(file_id: int, target_folder_id: int, user_id: int) -> int:
         minio_bucket=source.minio_bucket,
         minio_object_name=source.minio_object_name,
     )
-    # create_file 已处理缓存失效
     return new_id
+
+
+def _is_descendant(target_parent_id: int, folder_id: int) -> bool:
+    """检查 target_parent_id 是否是 folder_id 的后代（防止循环复制）"""
+    if target_parent_id == folder_id:
+        return True
+    conn = get_connection()
+    try:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            "SELECT path_node FROM `folder` WHERE id = %s AND is_deleted = 0",
+            (target_parent_id,),
+        )
+        row = cursor.fetchone()
+        if row and row.get("path_node"):
+            path_node = row["path_node"]
+            return f",{folder_id}," in path_node
+        return False
+    finally:
+        conn.close()
+
+
+def copy_folder(folder_id: int, target_parent_id: int, user_id: int) -> int:
+    """复制文件夹及其所有子文件和子文件夹"""
+    source_folder = get_folder_by_id(folder_id)
+    if source_folder is None:
+        raise ValueError("源文件夹不存在")
+
+    if _is_descendant(target_parent_id, folder_id):
+        raise ValueError("不能将文件夹复制到自身或其子文件夹中")
+
+    new_folder_id = create_folder(user_id, source_folder.name, target_parent_id)
+
+    content = list_folder_content(folder_id)
+
+    for sub_folder in content["folders"]:
+        copy_folder(sub_folder.id, new_folder_id, user_id)
+
+    for file_item in content["files"]:
+        copy_file(file_item.id, new_folder_id, user_id)
+
+    return new_folder_id
 
 
 def batch_copy(file_ids: list[int], target_folder_id: int, user_id: int):
     for file_id in file_ids:
         copy_file(file_id, target_folder_id, user_id)
+
+
+def batch_copy_typed(compound_ids: list[str], target_folder_id: int, user_id: int):
+    """批量复制，接受复合ID列表，自动区分文件夹和文件"""
+    from app.utils.id_utils import decode_id
+    for cid in compound_ids:
+        item_type, numeric_id = decode_id(cid)
+        if item_type == "folder":
+            copy_folder(numeric_id, target_folder_id, user_id)
+        else:
+            copy_file(numeric_id, target_folder_id, user_id)
 
 
 # ---------------------------------------------------------------------------

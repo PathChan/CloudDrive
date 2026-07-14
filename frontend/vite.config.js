@@ -21,6 +21,11 @@ export default defineConfig({
         target: 'http://localhost:8082',
         changeOrigin: true
       }
+    },
+    hmr: {
+      clientPort: 5174,
+      host: 'localhost',
+      overlay: true
     }
   }
 })

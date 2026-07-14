@@ -42,6 +42,7 @@ onMounted(() => {
 })
 onUnmounted(() => {
   window.removeEventListener('resize', checkMobile)
+  document.removeEventListener('click', handleDocumentClick)
 })
 
 function goLogout() {
@@ -75,9 +76,11 @@ function startNewFolder() {
 // 重命名
 const renamingId = ref(null)
 const renameName = ref('')
-const renameIsFolder = ref(false) // 当前重命名的条目是否为文件夹（解决 ID 冲突）
-const originalExt = ref('') // 原文件后缀，用于重命名时自动保留
+const renameIsFolder = ref(false)
+const originalExt = ref('')
+const renameOriginalName = ref('') // 原始名称，用于判断是否修改
 const renameConflict = ref(false)
+let renameInputEl = null
 let renameCheckTimer = null
 
 // 新建文件夹冲突检测
@@ -377,10 +380,12 @@ function onDragStart(e, file) {
   if (file.is_folder && activeTab.value !== 'files') return
   draggingFileIds.value = new Set([file.id])
   e.dataTransfer.effectAllowed = 'move'
-  // 设置一个拖拽图片防止浏览器默认行为
   const img = new Image()
   img.src = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'
   e.dataTransfer.setDragImage(img, 0, 0)
+  if (renamingId.value === file.id) {
+    cancelRename()
+  }
 }
 
 function onDragEnd() {
@@ -1037,8 +1042,7 @@ function closeUploadPanel() {
 async function previewFile(file) {
   previewError.value = ''
   previewUrl.value = ''
-  previewLoading.value = false
-  // 使用 /preview 端点（后端自动处理 PDF 转换和图片返回）
+  previewLoading.value = true
   previewUrl.value = api.cloudDrive.getPreviewUrl(file.id)
   previewingFile.value = file
 }
@@ -1336,11 +1340,11 @@ async function refreshTrashCount() {
 function startRename(file) {
   renamingId.value = file.id
   renameIsFolder.value = !!file.is_folder
+  renameOriginalName.value = file.name
   if (file.is_folder) {
     renameName.value = file.name
     originalExt.value = ''
   } else {
-    // 文件：提取不含后缀的名称部分，并保存原后缀
     const dotIdx = file.name.lastIndexOf('.')
     if (dotIdx > 0) {
       renameName.value = file.name.substring(0, dotIdx)
@@ -1351,6 +1355,11 @@ function startRename(file) {
     }
   }
   closeMenu()
+  nextTick(() => {
+    if (renameInputEl) {
+      renameInputEl.select()
+    }
+  })
 }
 
 // 确认重命名
@@ -1360,12 +1369,15 @@ async function confirmRename() {
     cancelRename()
     return
   }
+  if (!hasRenameChanged(name)) {
+    cancelRename()
+    return
+  }
   if (renameConflict.value) {
     errorMsg.value = '名称已存在'
     cancelRename()
     return
   }
-  // 如果是文件且用户未输入后缀，自动补上原后缀
   const hasExt = name.lastIndexOf('.') > 0
   if (!hasExt && originalExt.value) {
     name += originalExt.value
@@ -1377,6 +1389,7 @@ async function confirmRename() {
     originalExt.value = ''
     renameName.value = ''
     renameIsFolder.value = false
+    renameOriginalName.value = ''
     errorMsg.value = ''
     await loadFiles()
   } catch (e) {
@@ -1386,12 +1399,29 @@ async function confirmRename() {
   }
 }
 
+// 判断重命名是否有修改
+function hasRenameChanged(newName) {
+  if (renameIsFolder.value) {
+    return newName !== renameOriginalName.value
+  }
+  const fullNewName = newName.lastIndexOf('.') > 0 ? newName : newName + originalExt.value
+  return fullNewName !== renameOriginalName.value
+}
+
 // 取消重命名（重置所有编辑状态）
 function cancelRename() {
   renamingId.value = null
   renameName.value = ''
   renameIsFolder.value = false
   originalExt.value = ''
+  renameOriginalName.value = ''
+}
+
+// 点击外部区域退出重命名
+function handleDocumentClick(e) {
+  if (!renamingId.value) return
+  if (renameInputEl && renameInputEl.contains(e.target)) return
+  confirmRename()
 }
 
 // 右键菜单 / 移动端点击弹出
@@ -1431,6 +1461,7 @@ function handleClickOutside(e) {
 onMounted(() => {
   document.addEventListener('click', handleClickOutside)
   document.addEventListener('click', handleClickOutsideUpload)
+  document.addEventListener('click', handleDocumentClick)
   loadFiles()
   refreshTrashCount()
   loadQuickAccess()
@@ -1924,7 +1955,7 @@ onMounted(() => {
             'has-checked': selectedIds.size > 0,
             'is-dragging': draggingFileIds.has(file.id),
           }"
-          :draggable="activeTab === 'files' && !batchMode"
+          :draggable="activeTab === 'files' && !batchMode && renamingId !== file.id"
           @click="handleFileClick(file)"
           @dragstart="onDragStart($event, file)"
           @dragend="onDragEnd"
@@ -1944,10 +1975,11 @@ onMounted(() => {
         <div class="drive-file-info">
           <template v-if="renamingId === file.id">
             <input
+              :ref="(el) => { if (el) renameInputEl = el }"
               v-model="renameName"
               @keyup.enter="confirmRename"
               @keyup.escape="cancelRename"
-              @blur="confirmRename"
+              @mousedown.stop
               @click.stop
               class="drive-input drive-rename-input"
               :class="{ 'input-error': renameConflict }"
@@ -2092,6 +2124,8 @@ onMounted(() => {
             :src="previewUrl"
             :alt="previewingFile.name"
             class="drive-preview-image"
+            @load="previewLoading = false"
+            @error="previewError = '图片加载失败'"
           />
           <!-- PDF / 其他文件统一用 iframe -->
           <iframe
@@ -2099,6 +2133,8 @@ onMounted(() => {
             :src="previewUrl"
             class="drive-preview-iframe"
             frameborder="0"
+            @load="previewLoading = false"
+            @error="previewError = '加载失败'"
           ></iframe>
         </div>
       </div>
