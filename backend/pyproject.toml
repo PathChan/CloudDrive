@@ -1,0 +1,16 @@
+[project]
+name = "backend-py"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.139.0",
+    "minio>=7.2.20",
+    "mysql-connector-python>=9.7.0",
+    "pydantic-settings>=2.14.2",
+    "pyjwt>=2.13.0",
+    "python-multipart>=0.0.32",
+    "redis>=8.0.1",
+    "uvicorn[standard]>=0.49.0",
+]

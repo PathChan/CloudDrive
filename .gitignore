@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+.env
+
+# Node
+node_modules/
+nodejs/
+
+# UV (Python package manager)
+uv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+backend/.venv/
+frontend/node_modules/
