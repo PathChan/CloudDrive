@@ -36,6 +36,10 @@ async function handleLogin() {
     loading.value = false
   }
 }
+
+function microsoftLogin() {
+  window.location.href = 'https://ifollow.cloud/api/auth/microsoft/login'
+}
 </script>
 
 <template>
@@ -84,6 +88,20 @@ async function handleLogin() {
 
         <button @click="handleLogin" :disabled="loading" class="form-submit-btn">
           {{ loading ? '登录中...' : '登录' }}
+        </button>
+
+        <div class="sso-divider">
+          <span>或</span>
+        </div>
+
+        <button @click="microsoftLogin" class="microsoft-btn">
+          <svg class="microsoft-icon" viewBox="0 0 21 21" width="18" height="18">
+            <rect x="1" y="1" width="9" height="9" fill="#f25022"/>
+            <rect x="11" y="1" width="9" height="9" fill="#7fba00"/>
+            <rect x="1" y="11" width="9" height="9" fill="#00a4ef"/>
+            <rect x="11" y="11" width="9" height="9" fill="#ffb900"/>
+          </svg>
+          使用 Microsoft 账号登录
         </button>
 
         <p class="form-switch-text">
@@ -242,5 +260,52 @@ async function handleLogin() {
 
 .form-switch-link:hover {
   text-decoration: underline;
+}
+
+.sso-divider {
+  display: flex;
+  align-items: center;
+  margin: 16px 0;
+  gap: 12px;
+}
+
+.sso-divider::before,
+.sso-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--color-border);
+}
+
+.sso-divider span {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+}
+
+.microsoft-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 10px 0;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-raised);
+  color: var(--color-text);
+  font-size: 14px;
+  font-weight: 500;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.microsoft-btn:hover {
+  background: var(--color-bg);
+  border-color: var(--color-text-tertiary);
+}
+
+.microsoft-icon {
+  flex-shrink: 0;
 }
 </style>

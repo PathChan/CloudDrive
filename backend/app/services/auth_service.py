@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import uuid
 from typing import Optional
 from app.config import settings
 from app.database import get_connection
@@ -90,5 +91,34 @@ def get_user_by_token(token: str) -> Optional[User]:
         if row is None:
             return None
         return User(id=row["id"], username=row["username"], email=row["email"])
+    finally:
+        conn.close()
+
+
+def find_or_create_user(email: str, username: str) -> dict:
+    """查找微软 SSO 用户，不存在则自动创建"""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor(dictionary=True)
+        # 先通过邮箱查找
+        cursor.execute("SELECT * FROM user WHERE email = %s", (email,))
+        row = cursor.fetchone()
+        if row:
+            return {"id": row["id"], "username": row["username"], "email": row["email"]}
+
+        # 创建新用户，使用随机密码（无法通过密码登录）
+        random_pwd = _hmac_sha256(str(uuid.uuid4()))
+
+        # 检查用户名是否已被占用
+        cursor.execute("SELECT id FROM user WHERE username = %s", (username,))
+        if cursor.fetchone():
+            username = f"{username}_{uuid.uuid4().hex[:6]}"
+
+        cursor.execute(
+            "INSERT INTO user (username, password, email) VALUES (%s, %s, %s)",
+            (username, random_pwd, email),
+        )
+        conn.commit()
+        return {"id": cursor.lastrowid, "username": username, "email": email}
     finally:
         conn.close()

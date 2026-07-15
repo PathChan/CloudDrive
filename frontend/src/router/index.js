@@ -26,6 +26,13 @@ const router = createRouter({
 })
 
 router.beforeEach((to) => {
+  // 处理 SSO 登录回调携带的 token
+  if (to.query.token) {
+    localStorage.setItem('token', to.query.token)
+    // 清除 URL 中的 token 参数
+    return { path: to.path, query: {} }
+  }
+
   const token = localStorage.getItem('token')
   if (to.meta.requiresAuth && !token) {
     return '/login'

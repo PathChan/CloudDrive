@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     redis_host: str = "127.0.0.1"
     redis_port: int = 6379
 
+    # Microsoft SSO
+    microsoft_client_id: str = ""
+    microsoft_client_secret: str = ""
+    microsoft_tenant_id: str = "common"
+    microsoft_redirect_uri: str = "http://localhost:8082/api/auth/microsoft/callback"
+    frontend_url: str = "http://localhost:5174"
+
     # User
     user_secret_key: str
 

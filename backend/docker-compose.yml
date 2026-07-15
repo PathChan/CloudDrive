@@ -3,7 +3,7 @@ version: "3.8"
 services:
   mysql:
     image: mysql:8.0
-    container_name: litedoc-mysql
+    container_name: mysql
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: LiteDoc_db_8KfR3xZ9_mPqW@2024!
@@ -65,6 +65,12 @@ services:
       MINIO_BUCKET: litedoc
       MINIO_SECURE: "false"
       USER_SECRET_KEY: J9KL0xz13mBiz00kGUA8xzcoMoxz0I2N84b7vxiD7i3m9ZN2KaHZ8js
+      # Microsoft SSO
+      MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:-86c6ff40-afa2-47bb-943b-0eef01572784}
+      MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET}
+      MICROSOFT_TENANT_ID: ${MICROSOFT_TENANT_ID:-fdfed7bd-9f6a-44a1-b694-6e39c468c150}
+      MICROSOFT_REDIRECT_URI: ${MICROSOFT_REDIRECT_URI:-https://ifollow.cloud/api/auth/microsoft/callback}
+      FRONTEND_URL: ${FRONTEND_URL:-https://ifollow.cloud}
 
 volumes:
   litedoc-mysql-data:
