@@ -26,6 +26,7 @@ from app.services.redis_client import (
     invalidate_folder_content_multi,
     rebuild_all_cache as _rebuild_all_cache,
     verify_cache_consistency as _verify_cache_consistency,
+    repair_missing_breadcrumbs as _repair_missing_breadcrumbs,
 )
 
 
@@ -1387,3 +1388,18 @@ def rebuild_all_cache():
 def verify_cache_consistency() -> dict:
     """校验 Redis 持久化数据与数据库的一致性"""
     return _verify_cache_consistency(get_connection)
+
+
+def repair_missing_breadcrumbs(folder_ids: list[int]) -> dict:
+    """针对性修复缺失的面包屑缓存
+    
+    当一致性校验发现特定文件夹的面包屑缺失时，只重建这些缺失的面包屑，
+    而不是执行全量重建，提高效率。
+    
+    参数:
+        folder_ids: 需要修复面包屑的文件夹ID列表
+        
+    返回:
+        修复结果统计字典
+    """
+    return _repair_missing_breadcrumbs(get_connection, folder_ids)
