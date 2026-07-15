@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
-from app.routers import auth, cloud_drive
+from app.routers import auth, cloud_drive, microsoft_auth
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +207,7 @@ app.add_middleware(
 
 app.include_router(auth.router)
 app.include_router(cloud_drive.router)
+app.include_router(microsoft_auth.router)
 
 
 @app.get("/admin/health")
