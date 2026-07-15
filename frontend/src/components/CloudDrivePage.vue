@@ -142,7 +142,7 @@ const uploadFailedCount = ref(0)
 const uploadTotalCount = ref(0)
 
 let uploadTaskIdCounter = 0
-const MAX_CONCURRENT = 3  // 最大并行数
+const MAX_CONCURRENT = 8  // 最大并行数
 
 function createUploadTask(file, relativePath) {
   return {
@@ -2109,32 +2109,34 @@ onMounted(() => {
           </div>
         </div>
         <div class="drive-preview-body">
-          <!-- 加载中 -->
-          <div v-if="previewLoading" class="drive-preview-loading">
+          <!-- 加载中（覆盖层，不阻止底层元素渲染） -->
+          <div v-if="previewLoading && !previewError" class="drive-preview-loading">
             <div class="drive-spinner"></div>
             <span>加载中...</span>
           </div>
           <!-- 加载失败 -->
-          <div v-else-if="previewError" class="drive-preview-error">
+          <div v-if="previewError" class="drive-preview-error">
             <span>{{ previewError }}</span>
           </div>
-          <!-- 图片预览 -->
+          <!-- 图片预览（始终渲染，通过 v-show 控制显示） -->
           <img
-            v-else-if="previewUrl && isPreviewImage(previewingFile)"
+            v-if="previewUrl && isPreviewImage(previewingFile) && !previewError"
             :src="previewUrl"
             :alt="previewingFile.name"
             class="drive-preview-image"
+            :class="{ 'is-loading': previewLoading }"
             @load="previewLoading = false"
-            @error="previewError = '图片加载失败'"
+            @error="previewError = '图片加载失败'; previewLoading = false"
           />
-          <!-- PDF / 其他文件统一用 iframe -->
+          <!-- PDF / 其他文件统一用 iframe（始终渲染） -->
           <iframe
-            v-else-if="previewUrl"
+            v-if="previewUrl && !isPreviewImage(previewingFile) && !previewError"
             :src="previewUrl"
             class="drive-preview-iframe"
+            :class="{ 'is-loading': previewLoading }"
             frameborder="0"
             @load="previewLoading = false"
-            @error="previewError = '加载失败'"
+            @error="previewError = '加载失败'; previewLoading = false"
           ></iframe>
         </div>
       </div>

@@ -550,3 +550,73 @@ def verify_cache_consistency(get_db_connection: Callable) -> dict:
         return {"status": "error", "detail": str(e)}
     finally:
         conn.close()
+
+
+def repair_missing_breadcrumbs(get_db_connection: Callable, folder_ids: list[int]) -> dict:
+    """针对性修复缺失的面包屑缓存
+    
+    当一致性校验发现特定文件夹的面包屑缺失时，只重建这些缺失的面包屑，
+    而不是执行全量重建，提高效率。
+    
+    参数:
+        get_db_connection: 数据库连接工厂函数
+        folder_ids: 需要修复面包屑的文件夹ID列表
+        
+    返回:
+        修复结果统计字典
+    """
+    r = get_redis()
+    if r is None:
+        return {"status": "error", "detail": "redis_unavailable"}
+    
+    if not folder_ids:
+        return {"status": "ok", "repaired": 0, "detail": "no_folders_to_repair"}
+    
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor(dictionary=True)
+        repaired = 0
+        failed = 0
+        
+        for folder_id in folder_ids:
+            try:
+                # 查询文件夹信息及其祖先链
+                path = []
+                current_id = folder_id
+                max_depth = 50
+                
+                while current_id and current_id != 0 and max_depth > 0:
+                    cursor.execute(
+                        "SELECT id, name, parent_id FROM `folder` WHERE id = %s",
+                        (current_id,),
+                    )
+                    row = cursor.fetchone()
+                    if row is None:
+                        break
+                    path.insert(0, {"id": row["id"], "name": row["name"]})
+                    current_id = row["parent_id"]
+                    max_depth -= 1
+                
+                if path:
+                    set_persist_breadcrumb(folder_id, path)
+                    repaired += 1
+                else:
+                    failed += 1
+                    logger.warning(f"无法构建文件夹 {folder_id} 的面包屑：未找到路径")
+                    
+            except Exception as e:
+                failed += 1
+                logger.error(f"修复文件夹 {folder_id} 面包屑失败: {e}")
+        
+        logger.info(f"面包屑修复完成: {repaired} 个成功, {failed} 个失败")
+        return {
+            "status": "ok",
+            "repaired": repaired,
+            "failed": failed,
+            "total": len(folder_ids),
+        }
+    except Exception as e:
+        logger.error(f"面包屑修复失败: {e}", exc_info=True)
+        return {"status": "error", "detail": str(e)}
+    finally:
+        conn.close()

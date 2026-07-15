@@ -85,12 +85,29 @@ def _get_item_type(item_id: int) -> Optional[str]:
 
 
 def _get_file_full_dict(file_id: int) -> Optional[dict]:
-    """获取 file 表的完整行（含 mime_type/pdf_object_name 等不在 FileItem 模型中的字段）"""
+    """获取 file 表的完整行（含 mime_type/pdf_object_name 等不在 FileItem 模型中的字段）
+    
+    优先从Redis缓存读取，未命中时查询数据库并写入缓存
+    """
+    from app.services.redis_client import get_cached_file_info, set_cached_file_info
+    
+    # 尝试从缓存读取
+    cached = get_cached_file_info(file_id)
+    if cached is not None:
+        return cached
+    
+    # 缓存未命中，查询数据库
     conn = get_connection()
     try:
         cursor = conn.cursor(dictionary=True)
         cursor.execute("SELECT * FROM `file` WHERE id = %s", (file_id,))
-        return cursor.fetchone()
+        row = cursor.fetchone()
+        
+        # 写入缓存（如果查询到数据）
+        if row:
+            set_cached_file_info(file_id, row)
+        
+        return row
     finally:
         conn.close()
 
