@@ -191,11 +191,26 @@ def list_files(parent_id: Optional[str] = None, request: Request = None):
 
 
 @router.get("/files/search")
-def search_files(keyword: str, request: Request = None):
+def search_files(keyword: str, root_folder_id: Optional[str] = None, request: Request = None):
     user_id = require_user_id(request)
     if not keyword or not keyword.strip():
         raise HTTPException(status_code=400, detail="搜索关键词不能为空")
-    folders, files = cds.search_files(keyword.strip(), user_id)
+
+    # root_folder_id 可能是复合ID（如 "f2104"）或数字ID
+    numeric_root = 0
+    if root_folder_id:
+        if root_folder_id.startswith("f") or root_folder_id.startswith("d"):
+            try:
+                _, numeric_root = decode_id(root_folder_id)
+            except ValueError:
+                numeric_root = int(root_folder_id)
+        else:
+            try:
+                numeric_root = int(root_folder_id)
+            except ValueError:
+                numeric_root = 0
+
+    folders, files = cds.search_files(keyword.strip(), user_id, numeric_root)
     favorite_ids = cds.get_favorite_ids(user_id)
     items = []
     for f in folders:

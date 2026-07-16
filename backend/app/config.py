@@ -38,6 +38,14 @@ class Settings(BaseSettings):
     microsoft_redirect_uri: str = "http://localhost:8082/api/auth/microsoft/callback"
     frontend_url: str = "http://localhost:5174"
 
+    # LDAP
+    ldap_enabled: bool = False
+    ldap_server: str = ""
+    ldap_bind_dn: str = ""
+    ldap_bind_password: str = ""
+    ldap_base_dn: str = ""
+    ldap_user_filter: str = "(sAMAccountName={})"
+
     # User
     user_secret_key: str
 

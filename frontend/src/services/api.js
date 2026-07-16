@@ -77,6 +77,7 @@ export const api = {
   auth: {
     login: (data) => authRequest('/login', { method: 'POST', body: JSON.stringify(data) }),
     register: (data) => authRequest('/register', { method: 'POST', body: JSON.stringify(data) }),
+    ldapLogin: (data) => request('/api/auth/ldap/login', { method: 'POST', body: JSON.stringify(data) }),
   },
   cloudDrive: {
     list: (params = {}) => {
@@ -122,7 +123,7 @@ export const api = {
     },
     getBreadcrumb: (fileId) => request(`/breadcrumb/${getNumericId(fileId)}`),
 
-    search: (keyword) => request(`/files/search?keyword=${encodeURIComponent(keyword)}`),
+    search: (keyword, rootFolderId = 0) => request(`/files/search?keyword=${encodeURIComponent(keyword)}&root_folder_id=${rootFolderId}`),
 
     listTrash: () => request('/trash'),
     restoreFile: (fileId) => {

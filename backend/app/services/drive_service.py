@@ -910,16 +910,72 @@ def list_trash(user_id: int = 0) -> dict:
 # 搜索
 # ---------------------------------------------------------------------------
 
-def search_files(keyword: str, user_id: int) -> tuple[list[FolderItem], list[FileItem]]:
-    """模糊搜索文件和文件夹（返回 (folders, files) 元组）"""
+def _collect_subfolder_ids(root_folder_id: int, user_id: int) -> list[int]:
+    """递归收集 root_folder_id 下所有子文件夹 ID
+
+    - root_folder_id > 0: 收集该目录及其所有子目录（含自身）
+    - root_folder_id = 0: 收集所有顶层目录（parent_id=0）及其所有子目录
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        result = []
+        queue = []
+
+        if root_folder_id == 0:
+            # 根目录：从所有顶层文件夹开始递归
+            cursor.execute("SELECT id FROM `folder` WHERE parent_id = 0 AND is_deleted = 0")
+        else:
+            # 指定目录：从该目录开始递归
+            cursor.execute(
+                "SELECT id FROM `folder` WHERE id = %s AND is_deleted = 0",
+                (root_folder_id,)
+            )
+
+        for row in cursor.fetchall():
+            result.append(row[0])
+            queue.append(row[0])
+
+        while queue:
+            current = queue.pop(0)
+            cursor.execute(
+                "SELECT id FROM `folder` WHERE parent_id = %s AND is_deleted = 0",
+                (current,)
+            )
+            for row in cursor.fetchall():
+                result.append(row[0])
+                queue.append(row[0])
+
+        return result
+    finally:
+        conn.close()
+
+
+def search_files(keyword: str, user_id: int, root_folder_id: int = 0) -> tuple[list[FolderItem], list[FileItem]]:
+    """模糊搜索文件和文件夹（返回 (folders, files) 元组）
+
+    搜索范围由 root_folder_id 决定：
+    - root_folder_id = 0: 搜索所有顶层目录及其子目录
+    - root_folder_id > 0: 只搜索该目录及其子目录下的内容
+    """
     like = f"%{keyword}%"
     conn = get_connection()
     try:
         cursor = conn.cursor(dictionary=True)
+
+        # 获取搜索范围的文件夹 ID 列表
+        folder_ids = _collect_subfolder_ids(root_folder_id, user_id)
+
+        if not folder_ids:
+            # 没有任何可见目录，返回空结果
+            return [], []
+
+        placeholders = ','.join(['%s'] * len(folder_ids))
+
         # 搜索文件夹（模糊匹配，相关性排序：完全匹配 > 前缀匹配 > 模糊匹配）
         cursor.execute(
             "SELECT * FROM `folder` "
-            "WHERE user_id = %s AND is_deleted = 0 AND name LIKE %s "
+            f"WHERE id IN ({placeholders}) AND name LIKE %s AND is_deleted = 0 "
             "ORDER BY "
             "  CASE "
             "    WHEN name = %s THEN 0"
@@ -927,14 +983,20 @@ def search_files(keyword: str, user_id: int) -> tuple[list[FolderItem], list[Fil
             "    ELSE 2"
             "  END,"
             "  name ASC",
-            (user_id, like, keyword, f"{keyword}%"),
+            folder_ids + [like, keyword, f"{keyword}%"],
         )
         folders = [_folder_row_to_model(r) for r in cursor.fetchall()]
 
         # 搜索文件（模糊匹配，按相关性排序）
+        # 根目录搜索时，额外包含直接挂在根目录下的文件（folder_id = 0）
+        if root_folder_id == 0:
+            file_where = f"(folder_id IN ({placeholders}) OR folder_id = 0) AND name LIKE %s"
+        else:
+            file_where = f"folder_id IN ({placeholders}) AND name LIKE %s"
+
         cursor.execute(
             "SELECT * FROM `file` "
-            "WHERE user_id = %s AND is_deleted = 0 AND name LIKE %s "
+            f"WHERE {file_where} AND is_deleted = 0 "
             "ORDER BY "
             "  CASE "
             "    WHEN name = %s THEN 0"
@@ -942,7 +1004,7 @@ def search_files(keyword: str, user_id: int) -> tuple[list[FolderItem], list[Fil
             "    ELSE 2"
             "  END,"
             "  name ASC",
-            (user_id, like, keyword, f"{keyword}%"),
+            folder_ids + [like, keyword, f"{keyword}%"],
         )
         files = [_file_row_to_model(r) for r in cursor.fetchall()]
 

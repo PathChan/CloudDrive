@@ -655,7 +655,7 @@ async function doSearch() {
   loading.value = true
   errorMsg.value = ''
   try {
-    const data = await api.cloudDrive.search(searchKeyword.value.trim())
+    const data = await api.cloudDrive.search(searchKeyword.value.trim(), currentFolderId.value ?? 0)
     files.value = data.files || []
   } catch (e) {
     errorMsg.value = e.message || '搜索失败'

@@ -37,8 +37,37 @@ async function handleLogin() {
   }
 }
 
-function microsoftLogin() {
-  window.location.href = 'https://ifollow.cloud/api/auth/microsoft/login'
+// function microsoftLogin() {
+//   window.location.href = '/api/auth/microsoft/login'
+// }
+
+// LDAP 登录
+const showLdap = ref(false)
+const ldapUsername = ref('')
+const ldapPassword = ref('')
+const ldapLoading = ref(false)
+const ldapError = ref('')
+
+async function ldapLogin() {
+  ldapError.value = ''
+  if (!ldapUsername.value || !ldapPassword.value) {
+    ldapError.value = '请输入用户名和密码'
+    return
+  }
+  ldapLoading.value = true
+  try {
+    const data = await api.auth.ldapLogin({
+      username: ldapUsername.value,
+      password: ldapPassword.value
+    })
+    localStorage.setItem('token', data.token)
+    localStorage.setItem('username', data.user?.username || '')
+    router.replace('/')
+  } catch (error) {
+    ldapError.value = error.message || 'LDAP 登录失败'
+  } finally {
+    ldapLoading.value = false
+  }
 }
 </script>
 
@@ -90,6 +119,7 @@ function microsoftLogin() {
           {{ loading ? '登录中...' : '登录' }}
         </button>
 
+        <!--
         <div class="sso-divider">
           <span>或</span>
         </div>
@@ -103,6 +133,33 @@ function microsoftLogin() {
           </svg>
           使用 Microsoft 账号登录
         </button>
+        -->
+
+        <button @click="showLdap = true" class="ldap-btn">
+          使用 LDAP 域账号登录
+        </button>
+
+        <!-- LDAP 弹窗 -->
+        <div v-if="showLdap" class="ldap-overlay" @click.self="showLdap = false">
+          <div class="ldap-dialog">
+            <h3 class="ldap-title">LDAP 域账号登录</h3>
+            <div class="form-group">
+              <label class="form-label">用户名</label>
+              <input v-model="ldapUsername" placeholder="输入域账号" class="form-input" autofocus />
+            </div>
+            <div class="form-group">
+              <label class="form-label">密码</label>
+              <input v-model="ldapPassword" type="password" placeholder="域密码" class="form-input" @keydown.enter="ldapLogin" />
+            </div>
+            <p v-if="ldapError" class="form-error">{{ ldapError }}</p>
+            <div class="ldap-actions">
+              <button @click="showLdap = false" class="ldap-cancel-btn">取消</button>
+              <button @click="ldapLogin" :disabled="ldapLoading" class="ldap-submit-btn">
+                {{ ldapLoading ? '登录中...' : '登录' }}
+              </button>
+            </div>
+          </div>
+        </div>
 
         <p class="form-switch-text">
           没有账号？
@@ -307,5 +364,88 @@ function microsoftLogin() {
 
 .microsoft-icon {
   flex-shrink: 0;
+}
+
+.ldap-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 10px 0;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-raised);
+  color: var(--color-text);
+  font-size: 14px;
+  font-weight: 500;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+  margin-top: 10px;
+}
+
+.ldap-btn:hover {
+  background: var(--color-bg);
+  border-color: var(--color-text-tertiary);
+}
+
+.ldap-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.ldap-dialog {
+  background: var(--color-bg-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  padding: 28px;
+  width: 360px;
+  max-width: 90vw;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.12);
+}
+
+.ldap-title {
+  margin: 0 0 20px;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--color-text);
+  text-align: center;
+}
+
+.ldap-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.ldap-cancel-btn, .ldap-submit-btn {
+  flex: 1;
+  padding: 10px 0;
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: 14px;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.ldap-cancel-btn {
+  background: var(--color-bg);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+}
+
+.ldap-submit-btn {
+  background: var(--color-accent);
+  color: #fff;
+}
+
+.ldap-submit-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 </style>
