@@ -29,6 +29,7 @@ async function handleLogin() {
     const data = await api.auth.login({ email: email.value, password: password.value })
     localStorage.setItem('token', data.token)
     localStorage.setItem('username', data.user?.username || '')
+    localStorage.setItem('user', JSON.stringify(data.user || {}))
     router.replace('/')
   } catch (error) {
     errorMsg.value = error.message || '登录失败'
@@ -62,6 +63,7 @@ async function ldapLogin() {
     })
     localStorage.setItem('token', data.token)
     localStorage.setItem('username', data.user?.username || '')
+    localStorage.setItem('user', JSON.stringify(data.user || {}))
     router.replace('/')
   } catch (error) {
     ldapError.value = error.message || 'LDAP 登录失败'

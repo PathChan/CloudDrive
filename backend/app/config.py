@@ -40,11 +40,18 @@ class Settings(BaseSettings):
 
     # LDAP
     ldap_enabled: bool = False
-    ldap_server: str = ""
-    ldap_bind_dn: str = ""
+    ldap_host: str = ""
+    ldap_port: int = 389
+    ldap_use_ssl: bool = False
+    ldap_bind_user: str = ""
     ldap_bind_password: str = ""
-    ldap_base_dn: str = ""
-    ldap_user_filter: str = "(sAMAccountName={})"
+    ldap_user_search_base: str = ""
+    ldap_user_filter: str = "(&(objectClass=user)(sAMAccountName={username}))"
+    ldap_group_attribute: str = "memberOf"
+    ldap_user_group_dn: str = ""
+    ldap_admin_group_dn: str = ""
+    ldap_email_attribute: str = "mail,userPrincipalName"
+    ldap_display_name_attribute: str = "displayName"
 
     # User
     user_secret_key: str

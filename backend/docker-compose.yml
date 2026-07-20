@@ -71,6 +71,20 @@ services:
       MICROSOFT_TENANT_ID: ${MICROSOFT_TENANT_ID:-fdfed7bd-9f6a-44a1-b694-6e39c468c150}
       MICROSOFT_REDIRECT_URI: ${MICROSOFT_REDIRECT_URI:-https://ifollow.cloud/api/auth/microsoft/callback}
       FRONTEND_URL: ${FRONTEND_URL:-https://ifollow.cloud}
+      # LDAP
+      LDAP_ENABLED: ${LDAP_ENABLED:-true}
+      LDAP_HOST: ${LDAP_HOST}
+      LDAP_PORT: ${LDAP_PORT:-389}
+      LDAP_USE_SSL: ${LDAP_USE_SSL:-false}
+      LDAP_BIND_USER: ${LDAP_BIND_USER}
+      LDAP_BIND_PASSWORD: ${LDAP_BIND_PASSWORD}
+      LDAP_USER_SEARCH_BASE: ${LDAP_USER_SEARCH_BASE}
+      LDAP_USER_FILTER: ${LDAP_USER_FILTER:-(&(objectClass=user)(sAMAccountName={username}))}
+      LDAP_GROUP_ATTRIBUTE: ${LDAP_GROUP_ATTRIBUTE:-memberOf}
+      LDAP_USER_GROUP_DN: ${LDAP_USER_GROUP_DN}
+      LDAP_ADMIN_GROUP_DN: ${LDAP_ADMIN_GROUP_DN}
+      LDAP_EMAIL_ATTRIBUTE: ${LDAP_EMAIL_ATTRIBUTE:-mail,userPrincipalName}
+      LDAP_DISPLAY_NAME_ATTRIBUTE: ${LDAP_DISPLAY_NAME_ATTRIBUTE:-displayName}
 
 volumes:
   litedoc-mysql-data:

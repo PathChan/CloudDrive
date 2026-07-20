@@ -7,7 +7,8 @@ CREATE TABLE IF NOT EXISTS user (
     id       BIGINT AUTO_INCREMENT PRIMARY KEY,
     username VARCHAR(50)  NOT NULL UNIQUE,
     password VARCHAR(128) NOT NULL,
-    email    VARCHAR(100) NOT NULL UNIQUE
+    email    VARCHAR(100) NOT NULL UNIQUE,
+    role     VARCHAR(20)  NOT NULL DEFAULT 'user' COMMENT '角色：admin/user'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- 文件夹表
@@ -88,5 +89,9 @@ CREATE TABLE IF NOT EXISTS quick_access (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- 初始化管理员用户
-INSERT INTO user (username, password, email) VALUES ('admin', '84d6673c60123620923a6a612b4f6fd6f2786beb4d9e5c6ad90107aca6f79f90', 'admin@example.com');
-INSERT INTO user (username, password, email) VALUES ('123456', '84d6673c60123620923a6a612b4f6fd6f2786beb4d9e5c6ad90107aca6f79f90', '123456@example.com');
+INSERT INTO user (username, password, email, role) VALUES ('admin', '84d6673c60123620923a6a612b4f6fd6f2786beb4d9e5c6ad90107aca6f79f90', 'admin@example.com', 'admin')
+ON DUPLICATE KEY UPDATE role = 'admin';
+INSERT INTO user (username, password, email, role) VALUES ('123456', '84d6673c60123620923a6a612b4f6fd6f2786beb4d9e5c6ad90107aca6f79f90', '123456@example.com', 'admin')
+ON DUPLICATE KEY UPDATE role = 'admin';
+INSERT INTO user (username, password, email, role) VALUES ('12345678', 'd3807e5f699b4cacc7696b88f3b1eb525c6f84f4dee30851bf0d9df7b3bec6f7', '12345678@example.com', 'user')
+ON DUPLICATE KEY UPDATE role = 'user';

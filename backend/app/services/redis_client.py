@@ -60,8 +60,9 @@ def close_redis():
 
 # ---------- 缓存键定义 ----------
 
-def _key_folder_content(user_id: int, folder_id: int) -> str:
-    return f"fc:{user_id}:{folder_id}"
+def _key_folder_content(folder_id: int) -> str:
+    """目录内容缓存键（全局共享，不按用户分区——所有用户看到的目录内容相同）"""
+    return f"fc:{folder_id}"
 
 
 def _key_breadcrumb(folder_id: int) -> str:
@@ -146,7 +147,7 @@ def cache_delete(*keys: str):
 # 每个 set_cached_* 的持久化版本，供 rebuild_all_cache 使用
 
 def set_persist_folder_content(user_id: int, folder_id: int, data: dict):
-    cache_set_persist(_key_folder_content(user_id, folder_id), data)
+    cache_set_persist(_key_folder_content(folder_id), data)
 
 
 def set_persist_breadcrumb(folder_id: int, data: list):
@@ -176,19 +177,19 @@ def set_persist_trash(user_id: int, data: list):
 # ---------- 专用缓存操作 ----------
 
 def get_cached_folder_content(user_id: int, folder_id: int) -> Optional[dict]:
-    return cache_get(_key_folder_content(user_id, folder_id))
+    return cache_get(_key_folder_content(folder_id))
 
 
 def set_cached_folder_content(user_id: int, folder_id: int, data: dict):
-    cache_set_persist(_key_folder_content(user_id, folder_id), data)
+    cache_set_persist(_key_folder_content(folder_id), data)
 
 
 def invalidate_folder_content(user_id: int, folder_id: int):
-    cache_delete(_key_folder_content(user_id, folder_id))
+    cache_delete(_key_folder_content(folder_id))
 
 
 def invalidate_folder_content_multi(user_id: int, *folder_ids: int):
-    keys = [_key_folder_content(user_id, fid) for fid in folder_ids if fid is not None]
+    keys = [_key_folder_content(fid) for fid in folder_ids if fid is not None]
     if keys:
         cache_delete(*keys)
 
@@ -331,6 +332,17 @@ def rebuild_all_cache(get_db_connection: Callable):
         logger.warning("Redis 不可用，跳过全量重建")
         return {"status": "skipped", "reason": "redis_unavailable"}
 
+    # 先清理所有旧的持久化键（防止旧格式键残留导致数据不一致）
+    try:
+        old_keys = []
+        for prefix in _PERSIST_KEY_PREFIXES:
+            old_keys.extend(r.keys(f"{prefix}*") or [])
+        if old_keys:
+            r.delete(*old_keys)
+            logger.info(f"已清理 {len(old_keys)} 个旧持久化键")
+    except Exception as e:
+        logger.warning(f"清理旧键失败（不影响重建）: {e}")
+
     conn = get_db_connection()
     try:
         cursor = conn.cursor(dictionary=True)
@@ -343,76 +355,77 @@ def rebuild_all_cache(get_db_connection: Callable):
         folders_written = 0
         files_written = 0
 
+        # ---------- 2. 重建所有文件夹内容（全局共享，不过滤 user_id）----------
+        # 读取所有非删除文件夹
+        cursor.execute(
+            "SELECT * FROM `folder` WHERE is_deleted = 0 ORDER BY parent_id, name",
+        )
+        all_folders = cursor.fetchall()
+
+        # 缓存每个文件夹的信息（全局共享）
+        folder_info_map = {}
+        for f in all_folders:
+            fid = f["id"]
+            folder_info_map[fid] = f
+            set_persist_folder_info(fid, f)
+            total_keys += 1
+
+        # 按 parent_id 分组
+        folder_by_parent: dict[int, list] = {}
+        for f in all_folders:
+            pid = f["parent_id"]
+            folder_by_parent.setdefault(pid, []).append(f)
+
+        # 读取所有非删除文件
+        cursor.execute(
+            "SELECT * FROM `file` WHERE is_deleted = 0 ORDER BY folder_id, name",
+        )
+        all_files = cursor.fetchall()
+
+        # 按 folder_id 分组
+        file_by_folder: dict[int, list] = {}
+        for f in all_files:
+            fid = f["folder_id"]
+            file_by_folder.setdefault(fid, []).append(f)
+            set_persist_file_info(f["id"], f)
+            total_keys += 1
+            files_written += 1
+
+        # 为所有 parent_id（包括文件所在目录）写入共享内容缓存
+        all_parent_ids = set(folder_by_parent.keys()) | set(file_by_folder.keys()) | {0}
+        for pid in all_parent_ids:
+            folders_at_pid = folder_by_parent.get(pid, [])
+            files_at_pid = file_by_folder.get(pid, [])
+            content_data = {
+                "folders": folders_at_pid,
+                "files": files_at_pid,
+            }
+            set_persist_folder_content(0, pid, content_data)
+            total_keys += 1
+
+        # ---------- 3. 面包屑 ----------
+        for fid in folder_info_map:
+            bc = _build_breadcrumb_from_map(fid, folder_info_map)
+            if bc:
+                set_persist_breadcrumb(fid, bc)
+                total_keys += 1
+
+        folders_written += len(all_folders)
+
         for uid in user_ids:
-            # ---------- 2. 重建所有文件夹的层级内容 ----------
-            # 读取所有非删除文件夹
+            # ---------- 4. 收藏 ID（按用户）----------
             cursor.execute(
-                "SELECT * FROM `folder` WHERE user_id = %s AND is_deleted = 0 ORDER BY parent_id, name",
+                "SELECT file_id, item_type FROM `favorites` WHERE user_id = %s",
                 (uid,),
             )
-            all_folders = cursor.fetchall()
-
-            # 先缓存每个文件夹的信息
-            folder_info_map = {}
-            for f in all_folders:
-                fid = f["id"]
-                folder_info_map[fid] = f
-                set_persist_folder_info(fid, f)
-                total_keys += 1
-
-            # 按 parent_id 分组写入文件夹内容缓存
-            folder_by_parent: dict[int, list] = {}
-            for f in all_folders:
-                pid = f["parent_id"]
-                folder_by_parent.setdefault(pid, []).append(f)
-
-            # 读取所有非删除文件
-            cursor.execute(
-                "SELECT * FROM `file` WHERE user_id = %s AND is_deleted = 0 ORDER BY folder_id, name",
-                (uid,),
-            )
-            all_files = cursor.fetchall()
-
-            # 按 folder_id 分组
-            file_by_folder: dict[int, list] = {}
-            for f in all_files:
-                fid = f["folder_id"]
-                file_by_folder.setdefault(fid, []).append(f)
-                # 缓存文件信息
-                set_persist_file_info(f["id"], f)
-                total_keys += 1
-                files_written += 1
-
-            # 为所有 parent_id（包括根 0 和所有出现的 parent_id）写入内容缓存
-            all_parent_ids = set(folder_by_parent.keys()) | {0}
-            for pid in all_parent_ids:
-                folders_at_pid = folder_by_parent.get(pid, [])
-                files_at_pid = file_by_folder.get(pid, [])
-                content_data = {
-                    "folders": folders_at_pid,
-                    "files": files_at_pid,
-                }
-                set_persist_folder_content(uid, pid, content_data)
-                total_keys += 1
-
-            # ---------- 3. 面包屑 ----------
-            # 为每个文件夹及其根路径生成面包屑
-            for fid in folder_info_map:
-                bc = _build_breadcrumb_from_map(fid, folder_info_map)
-                if bc:
-                    set_persist_breadcrumb(fid, bc)
-                    total_keys += 1
-
-            # ---------- 4. 收藏 ID ----------
-            cursor.execute(
-                "SELECT file_id FROM `favorites` WHERE user_id = %s",
-                (uid,),
-            )
-            fav_ids = {row["file_id"] for row in cursor.fetchall()}
+            fav_ids = set()
+            for row in cursor.fetchall():
+                from app.utils.id_utils import encode_id
+                fav_ids.add(encode_id(row["file_id"], row["item_type"]))
             set_persist_favorite_ids(uid, fav_ids)
             total_keys += 1
 
-            # ---------- 5. 回收站 ----------
+            # ---------- 5. 回收站（按用户）----------
             cursor.execute(
                 "SELECT * FROM `folder` WHERE user_id = %s AND is_deleted = 1",
                 (uid,),
@@ -426,8 +439,6 @@ def rebuild_all_cache(get_db_connection: Callable):
             if trash_folders or trash_files:
                 set_persist_trash(uid, {"folders": trash_folders, "files": trash_files})
                 total_keys += 1
-
-            folders_written += len(all_folders)
 
         # ---------- 6. 总大小 ----------
         cursor.execute("SELECT COALESCE(SUM(size), 0) AS total FROM `file` WHERE is_deleted = 0")
@@ -493,16 +504,28 @@ def verify_cache_consistency(get_db_connection: Callable) -> dict:
         if not persist_keys:
             return {"status": "inconsistent", "detail": "redis_empty"}
 
-        # 2. 检查每个用户的文件夹内容缓存
+        # 2. 检查全局文件夹内容缓存（根目录 fc:0）—— 不仅要存在，还要有实际内容
+        root_key = _key_folder_content(0)
+        if root_key not in persist_keys:
+            issues.append("根目录缓存缺失 (fc:0)")
+        else:
+            try:
+                root_data = json.loads(r.get(root_key) or "{}")
+                if not root_data.get("folders") and not root_data.get("files"):
+                    # fc:0 存在但内容为空，可能是旧格式残留，需要重建
+                    cursor.execute("SELECT 1 FROM `folder` WHERE parent_id = 0 AND is_deleted = 0 LIMIT 1")
+                    has_root_folders = cursor.fetchone() is not None
+                    cursor.execute("SELECT 1 FROM `file` WHERE folder_id = 0 AND is_deleted = 0 LIMIT 1")
+                    has_root_files = cursor.fetchone() is not None
+                    if has_root_folders or has_root_files:
+                        issues.append("根目录缓存内容为空，DB中存在根目录数据 (fc:0)")
+            except Exception:
+                issues.append("根目录缓存数据异常 (fc:0)")
+
         cursor.execute("SELECT id FROM `user`")
         user_ids = [row["id"] for row in cursor.fetchall()]
 
         for uid in user_ids:
-            # 检查 fc:{uid}:0（根目录）是否存在
-            root_key = _key_folder_content(uid, 0)
-            if root_key not in persist_keys:
-                issues.append(f"用户 {uid} 根目录缓存缺失")
-
             # 检查面包屑
             cursor.execute(
                 "SELECT id FROM `folder` WHERE user_id = %s AND is_deleted = 0",

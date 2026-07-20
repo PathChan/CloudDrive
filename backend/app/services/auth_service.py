@@ -18,10 +18,10 @@ def _hmac_sha256(s: str) -> str:
 
 def _user_row_to_model(row: tuple, columns: list[str]) -> User:
     d = dict(zip(columns, row))
-    return User(id=d["id"], username=d["username"], email=d["email"])
+    return User(id=d["id"], username=d["username"], email=d["email"], role=d.get("role", "user"))
 
 
-def register(username: str, password: str, email: str) -> str:
+def register(username: str, password: str, email: str) -> tuple[str, User]:
     if not username or not username.strip():
         raise ValueError("用户名不能为空")
     if not password or not password.strip():
@@ -49,13 +49,13 @@ def register(username: str, password: str, email: str) -> str:
         row = cursor.fetchone()
         if row is None:
             raise ValueError("注册失败")
-        user = User(id=row["id"], username=row["username"], email=row["email"])
-        return create_token(user.id, user.username)
+        user = User(id=row["id"], username=row["username"], email=row["email"], role=row.get("role", "user"))
+        return create_token(user.id, user.username, user.role), user
     finally:
         conn.close()
 
 
-def login(email: str, password: str) -> str:
+def login(email: str, password: str) -> tuple[str, User]:
     if not email or not email.strip():
         raise ValueError("邮箱不能为空")
     if not password or not password.strip():
@@ -73,8 +73,11 @@ def login(email: str, password: str) -> str:
         row = cursor.fetchone()
         if row is None:
             raise ValueError("邮箱或密码错误")
-        user = User(id=row["id"], username=row["username"], email=row["email"])
-        return create_token(user.id, user.username)
+        role = row.get("role", "user")
+        if role not in ("admin", "user"):
+            role = "user"
+        user = User(id=row["id"], username=row["username"], email=row["email"], role=role)
+        return create_token(user.id, user.username, user.role), user
     finally:
         conn.close()
 
@@ -90,7 +93,8 @@ def get_user_by_token(token: str) -> Optional[User]:
         row = cursor.fetchone()
         if row is None:
             return None
-        return User(id=row["id"], username=row["username"], email=row["email"])
+        role = row.get("role", "user")
+        return User(id=row["id"], username=row["username"], email=row["email"], role=role)
     finally:
         conn.close()
 
