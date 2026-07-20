@@ -7,6 +7,7 @@ class User(BaseModel):
     id: int
     username: str
     email: str
+    role: str = "user"
 
 
 class FolderItem(BaseModel):

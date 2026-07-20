@@ -5,12 +5,17 @@ from app.config import settings
 
 ALGORITHM = "HS256"
 
+VALID_ROLES = {"admin", "user"}
 
-def create_token(user_id: int, username: str) -> str:
+
+def create_token(user_id: int, username: str, role: str = "user") -> str:
+    if role not in VALID_ROLES:
+        role = "user"
     now = datetime.now(timezone.utc)
     payload = {
         "user_id": user_id,
         "username": username,
+        "role": role,
         "iat": now,
         "exp": now + timedelta(hours=settings.jwt_expiration_hours),
     }
@@ -36,3 +41,14 @@ def get_username_from_token(token: str) -> Optional[str]:
     if payload is None:
         return None
     return payload.get("username")
+
+
+def get_role_from_token(token: str) -> str:
+    """从 JWT 中获取角色，缺失或异常时默认返回 user"""
+    payload = verify_token(token)
+    if payload is None:
+        return "user"
+    role = payload.get("role", "user")
+    if role not in VALID_ROLES:
+        return "user"
+    return role

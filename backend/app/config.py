@@ -31,6 +31,28 @@ class Settings(BaseSettings):
     redis_host: str = "127.0.0.1"
     redis_port: int = 6379
 
+    # Microsoft SSO
+    microsoft_client_id: str = ""
+    microsoft_client_secret: str = ""
+    microsoft_tenant_id: str = "common"
+    microsoft_redirect_uri: str = "http://localhost:8082/api/auth/microsoft/callback"
+    frontend_url: str = "http://localhost:5174"
+
+    # LDAP
+    ldap_enabled: bool = False
+    ldap_host: str = ""
+    ldap_port: int = 389
+    ldap_use_ssl: bool = False
+    ldap_bind_user: str = ""
+    ldap_bind_password: str = ""
+    ldap_user_search_base: str = ""
+    ldap_user_filter: str = "(&(objectClass=user)(sAMAccountName={username}))"
+    ldap_group_attribute: str = "memberOf"
+    ldap_user_group_dn: str = ""
+    ldap_admin_group_dn: str = ""
+    ldap_email_attribute: str = "mail,userPrincipalName"
+    ldap_display_name_attribute: str = "displayName"
+
     # User
     user_secret_key: str
 

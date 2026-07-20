@@ -32,6 +32,18 @@ const router = useRouter()
 
 const username = ref(localStorage.getItem('username') || '未登录')
 
+// 用户角色：从 localStorage 读取
+const userRole = ref('user')
+try {
+  const userStr = localStorage.getItem('user')
+  if (userStr) {
+    const user = JSON.parse(userStr)
+    userRole.value = user.role === 'admin' ? 'admin' : 'user'
+  }
+} catch {
+  userRole.value = 'user'
+}
+
 const isMobile = ref(false)
 function checkMobile() {
   isMobile.value = window.innerWidth <= 768
@@ -48,6 +60,7 @@ onUnmounted(() => {
 function goLogout() {
   localStorage.removeItem('token')
   localStorage.removeItem('username')
+  localStorage.removeItem('user')
   router.push('/login')
 }
 
@@ -655,7 +668,7 @@ async function doSearch() {
   loading.value = true
   errorMsg.value = ''
   try {
-    const data = await api.cloudDrive.search(searchKeyword.value.trim())
+    const data = await api.cloudDrive.search(searchKeyword.value.trim(), currentFolderId.value ?? 0)
     files.value = data.files || []
   } catch (e) {
     errorMsg.value = e.message || '搜索失败'
@@ -1504,14 +1517,14 @@ onMounted(() => {
       <div class="drive-sidebar-group">
         <div class="drive-sidebar-group-header">
           <span class="drive-sidebar-group-title">快捷访问</span>
-          <button @click.stop="openQuickAccessPicker" class="drive-sidebar-group-add" title="添加快捷访问">
+          <button v-if="userRole === 'admin'" @click.stop="openQuickAccessPicker" class="drive-sidebar-group-add" title="添加快捷访问">
             <Plus :size="14" />
           </button>
         </div>
         <div class="drive-sidebar-group-items">
           <!-- 拖拽时显示的 "+" 投放区域 -->
           <div
-            v-if="draggingFileIds.size > 0"
+            v-if="draggingFileIds.size > 0 && userRole === 'admin'"
             class="drive-qa-drop-zone"
             @dragover.prevent="dragOverFolderId = '__qa_container__'"
             @dragleave="dragOverFolderId = null"
@@ -1655,12 +1668,12 @@ onMounted(() => {
       </div>
 
       <div class="drive-actions-buttons">
-        <button @click="startNewFolder" class="drive-action-btn">
+        <button v-if="userRole === 'admin'" @click="startNewFolder" class="drive-action-btn">
           <FolderPlus :size="14" />
           <span>新建文件夹</span>
         </button>
         <button
-          v-if="clipboard.length > 0"
+          v-if="clipboard.length > 0 && userRole === 'admin'"
           @click="pasteFromClipboard"
           class="drive-action-btn drive-action-btn-primary"
         >
@@ -1688,7 +1701,7 @@ onMounted(() => {
         </button>
         <!-- 移动 -->
         <button
-          v-if="selectedIds.size > 0"
+          v-if="selectedIds.size > 0 && userRole === 'admin'"
           @click="openBatchMoveDialog"
           class="drive-action-btn"
         >
@@ -1697,7 +1710,7 @@ onMounted(() => {
         </button>
         <!-- 复制 -->
         <button
-          v-if="selectedIds.size > 0"
+          v-if="selectedIds.size > 0 && userRole === 'admin'"
           @click="batchCopyToClipboard"
           class="drive-action-btn"
         >
@@ -1706,7 +1719,7 @@ onMounted(() => {
         </button>
         <!-- 剪切 -->
         <button
-          v-if="selectedIds.size > 0"
+          v-if="selectedIds.size > 0 && userRole === 'admin'"
           @click="batchCutToClipboard"
           class="drive-action-btn"
         >
@@ -1715,6 +1728,7 @@ onMounted(() => {
         </button>
         <!-- 删除 - 始终可见，未选择时禁用 -->
         <button
+          v-if="userRole === 'admin'"
           @click="batchDeleteFiles"
           class="drive-action-btn drive-action-btn-danger"
           :disabled="selectedIds.size === 0 || batchDeleting"
@@ -1724,7 +1738,7 @@ onMounted(() => {
           <Loader :size="14" class="icon-spin" v-else />
           <span>{{ batchDeleting ? '删除中...' : selectedIds.size > 0 ? `删除 (${selectedIds.size})` : '删除' }}</span>
         </button>
-        <div class="drive-upload-dropdown">
+        <div v-if="userRole === 'admin'" class="drive-upload-dropdown">
           <button
             ref="uploadBtnRef"
             @click="toggleUploadMenu"
@@ -1887,7 +1901,7 @@ onMounted(() => {
     </div>
 
     <!-- 回收站操作栏 -->
-    <div class="drive-actions-row" v-if="activeTab === 'trash' && files.length > 0">
+    <div class="drive-actions-row" v-if="activeTab === 'trash' && files.length > 0 && userRole === 'admin'">
       <button @click="emptyTrash" class="drive-action-btn drive-action-btn-danger">
         <Trash2 :size="16" />
         <span>清空回收站</span>
@@ -2007,7 +2021,7 @@ onMounted(() => {
 
         <!-- 收藏星标 -->
         <button
-          v-if="activeTab !== 'trash' && !batchMode"
+          v-if="activeTab !== 'trash' && !batchMode && userRole === 'admin'"
           @click.stop="toggleFavorite(file)"
           class="drive-favorite-btn"
           :class="{ favorited: file.is_favorite }"
@@ -2019,7 +2033,7 @@ onMounted(() => {
 
         <div class="drive-file-actions drive-menu-wrapper" v-if="!batchMode">
           <!-- 回收站操作 -->
-          <template v-if="activeTab === 'trash'">
+          <template v-if="activeTab === 'trash' && userRole === 'admin'">
             <button @click.stop="restoreFromTrash(file)" class="drive-file-action-btn" title="恢复">
               <RotateCcw :size="16" />
             </button>
@@ -2047,19 +2061,19 @@ onMounted(() => {
           <div v-if="menuFileId === file.id" class="drive-menu" :style="menuStyle" @click.stop>
             <div v-if="isMobile" class="drive-menu-overlay" @click="closeMenu"></div>
             <div class="drive-menu-content" :class="{ 'drive-menu-content-mobile': isMobile }">
-            <button @click="startRename(file)" class="drive-menu-item">
+            <button v-if="userRole === 'admin'" @click="startRename(file)" class="drive-menu-item">
               <Pencil :size="13" />
               <span>重命名</span>
             </button>
-            <button @click="openMoveDialog(file)" class="drive-menu-item">
+            <button v-if="userRole === 'admin'" @click="openMoveDialog(file)" class="drive-menu-item">
               <FolderPlus :size="13" />
               <span>移动</span>
             </button>
-            <button @click="copyToClipboard(file)" class="drive-menu-item">
+            <button v-if="userRole === 'admin'" @click="copyToClipboard(file)" class="drive-menu-item">
               <Copy :size="13" />
               <span>复制</span>
             </button>
-            <button @click="cutToClipboard(file)" class="drive-menu-item">
+            <button v-if="userRole === 'admin'" @click="cutToClipboard(file)" class="drive-menu-item">
               <Scissors :size="13" />
               <span>剪切</span>
             </button>
@@ -2075,11 +2089,13 @@ onMounted(() => {
               <Info :size="13" />
               <span>详情</span>
             </button>
+            <template v-if="userRole === 'admin'">
             <div class="drive-menu-divider"></div>
             <button @click="deleteFile(file)" class="drive-menu-item drive-menu-item-danger">
               <Trash2 :size="13" />
               <span>删除</span>
             </button>
+            </template>
             </div>
           </div>
         </div>

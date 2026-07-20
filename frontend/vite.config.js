@@ -14,11 +14,11 @@ export default defineConfig({
     port: 5174,
     proxy: {
       '/api/cloud-drive': {
-        target: 'http://localhost:8082',
+        target: 'http://localhost:5000',
         changeOrigin: true
       },
       '/api/auth': {
-        target: 'http://localhost:8082',
+        target: 'http://localhost:5000',
         changeOrigin: true
       }
     },

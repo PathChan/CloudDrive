@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Request, Q
 from pydantic import BaseModel
 from typing import Optional
 from app.services import drive_service as cds
-from app.utils.jwt_util import get_user_id_from_token
+from app.utils.jwt_util import get_user_id_from_token, get_role_from_token
 from app.models import FileItem, FolderItem, QuickAccessItem
 from app.config import settings
 from app.database import get_connection
@@ -63,6 +63,20 @@ def require_user_id(request: Request) -> int:
     if uid is None:
         return 1  # 默认用户（未登录时）
     return uid
+
+
+FORBIDDEN_RESPONSE = {"error": "只读用户无权执行该操作"}
+
+
+def require_admin(request: Request):
+    """校验当前用户是否为 admin，只读用户返回 403"""
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=403, detail=FORBIDDEN_RESPONSE)
+    token = auth_header[7:]
+    role = get_role_from_token(token)
+    if role != "admin":
+        raise HTTPException(status_code=403, detail=FORBIDDEN_RESPONSE)
 
 
 def _get_item_type(item_id: int) -> Optional[str]:
@@ -191,11 +205,26 @@ def list_files(parent_id: Optional[str] = None, request: Request = None):
 
 
 @router.get("/files/search")
-def search_files(keyword: str, request: Request = None):
+def search_files(keyword: str, root_folder_id: Optional[str] = None, request: Request = None):
     user_id = require_user_id(request)
     if not keyword or not keyword.strip():
         raise HTTPException(status_code=400, detail="搜索关键词不能为空")
-    folders, files = cds.search_files(keyword.strip(), user_id)
+
+    # root_folder_id 可能是复合ID（如 "f2104"）或数字ID
+    numeric_root = 0
+    if root_folder_id:
+        if root_folder_id.startswith("f") or root_folder_id.startswith("d"):
+            try:
+                _, numeric_root = decode_id(root_folder_id)
+            except ValueError:
+                numeric_root = int(root_folder_id)
+        else:
+            try:
+                numeric_root = int(root_folder_id)
+            except ValueError:
+                numeric_root = 0
+
+    folders, files = cds.search_files(keyword.strip(), user_id, numeric_root)
     favorite_ids = cds.get_favorite_ids(user_id)
     items = []
     for f in folders:
@@ -222,6 +251,7 @@ def list_trash(request: Request = None):
 @router.post("/trash/restore/{file_id}")
 def restore_file(file_id: int, request: Request = None, type: Optional[str] = Query(None)):
     """恢复回收站条目，支持 type 参数：?type=folder 或 ?type=file"""
+    require_admin(request)
     user_id = require_user_id(request)
     item_type = _resolve_type_param(type, file_id)
     if item_type == "folder":
@@ -236,6 +266,7 @@ def restore_file(file_id: int, request: Request = None, type: Optional[str] = Qu
 @router.delete("/trash/permanent/{file_id}")
 def permanent_delete_file(file_id: int, request: Request = None, type: Optional[str] = Query(None)):
     """永久删除，支持 type 参数：?type=folder 或 ?type=file"""
+    require_admin(request)
     user_id = require_user_id(request)
     item_type = _resolve_type_param(type, file_id)
     if item_type == "folder":
@@ -249,6 +280,7 @@ def permanent_delete_file(file_id: int, request: Request = None, type: Optional[
 
 @router.delete("/trash/empty")
 def empty_trash(request: Request = None):
+    require_admin(request)
     user_id = require_user_id(request)
     cds.empty_trash(user_id)
     return {"success": True}
@@ -275,6 +307,7 @@ class ToggleFavoriteBody(BaseModel):
 
 @router.post("/file/{file_id}/favorite")
 def toggle_favorite(file_id: int, body: ToggleFavoriteBody, request: Request = None):
+    require_admin(request)
     user_id = require_user_id(request)
     item_type = body.item_type or _get_item_type(file_id)
     if item_type is None:
@@ -296,6 +329,7 @@ class BatchDeleteBody(BaseModel):
 
 @router.post("/batch/delete")
 def batch_delete(body: BatchDeleteBody, request: Request = None):
+    require_admin(request)
     user_id = require_user_id(request)
     if not body.items:
         raise HTTPException(status_code=400, detail="条目列表不能为空")
@@ -310,6 +344,7 @@ class BatchMoveBody(BaseModel):
 
 @router.post("/batch/move")
 def batch_move(body: BatchMoveBody, request: Request = None):
+    require_admin(request)
     user_id = require_user_id(request)
     if not body.items:
         raise HTTPException(status_code=400, detail="条目列表不能为空")
@@ -333,6 +368,7 @@ class CopyBody(BaseModel):
 
 @router.post("/file/copy")
 def copy_file(body: CopyBody, request: Request = None):
+    require_admin(request)
     user_id = require_user_id(request)
     target_num = 0
     if body.target_parent_id:
@@ -356,6 +392,7 @@ class UndoUploadBody(BaseModel):
 @router.post("/upload/undo")
 def undo_upload(body: UndoUploadBody, request: Request = None):
     """上传失败时回滚：永久删除已创建的文件记录和 MinIO 对象"""
+    require_admin(request)
     user_id = require_user_id(request)
     if not body.file_ids:
         return {"success": True}
@@ -370,6 +407,7 @@ class BatchCopyBody(BaseModel):
 
 @router.post("/batch/copy")
 def batch_copy(body: BatchCopyBody, request: Request = None):
+    require_admin(request)
     user_id = require_user_id(request)
     if not body.items:
         raise HTTPException(status_code=400, detail="条目列表不能为空")
@@ -425,6 +463,7 @@ class CreateFolderBody(BaseModel):
 
 @router.post("/folder")
 def create_folder(body: CreateFolderBody, request: Request = None):
+    require_admin(request)
     user_id = require_user_id(request)
     name = body.name.strip()
     if not name:
@@ -459,6 +498,7 @@ class UploadPresignBody(BaseModel):
 
 @router.post("/upload/presign")
 def get_upload_presign(body: UploadPresignBody, request: Request = None):
+    require_admin(request)
     user_id = require_user_id(request)
     filename = _validate_file_type(body.filename)
     ext = ""
@@ -479,6 +519,7 @@ class UploadConfirmBody(BaseModel):
 
 @router.post("/upload/confirm")
 def confirm_upload(body: UploadConfirmBody, request: Request = None):
+    require_admin(request)
     user_id = require_user_id(request)
     name = body.name.strip()
     if not name or not body.objectName:
@@ -656,6 +697,7 @@ class RenameBody(BaseModel):
 
 @router.put("/file/{file_id}/rename")
 def rename_file(file_id: int, body: RenameBody, request: Request = None):
+    require_admin(request)
     user_id = require_user_id(request)
     name = body.name.strip()
     if not name:
@@ -684,6 +726,7 @@ class MoveBody(BaseModel):
 @router.put("/file/{file_id}/move")
 def move_file(file_id: int, body: MoveBody, request: Request = None, type: Optional[str] = Query(None)):
     """移动，支持 type 参数：?type=folder 或 ?type=file"""
+    require_admin(request)
     user_id = require_user_id(request)
     item_type = _resolve_type_param(type, file_id)
     numeric_parent = 0
@@ -707,6 +750,7 @@ def move_file(file_id: int, body: MoveBody, request: Request = None, type: Optio
 @router.delete("/file/{file_id}")
 def delete_file(file_id: int, request: Request = None, type: Optional[str] = Query(None)):
     """删除，支持 type 参数：?type=folder 或 ?type=file"""
+    require_admin(request)
     user_id = require_user_id(request)
     item_type = _resolve_type_param(type, file_id)
     if item_type == "folder":
@@ -774,6 +818,7 @@ def list_quick_access(request: Request = None):
 
 @router.post("/quick-access")
 def add_quick_access(body: AddQuickAccessBody, request: Request = None):
+    require_admin(request)
     user_id = require_user_id(request)
     name = body.name.strip()
     if not name:
@@ -790,6 +835,7 @@ def add_quick_access(body: AddQuickAccessBody, request: Request = None):
 
 @router.put("/quick-access/{item_id}")
 def update_quick_access(item_id: int, body: UpdateQuickAccessBody, request: Request = None):
+    require_admin(request)
     user_id = require_user_id(request)
     name = body.name.strip()
     if not name:
@@ -800,6 +846,7 @@ def update_quick_access(item_id: int, body: UpdateQuickAccessBody, request: Requ
 
 @router.delete("/quick-access/{item_id}")
 def delete_quick_access(item_id: int, request: Request = None):
+    require_admin(request)
     user_id = require_user_id(request)
     cds.delete_quick_access(item_id, user_id)
     return {"success": True}
@@ -814,6 +861,7 @@ async def proxy_upload(
     relative_path: Optional[str] = Form(None),
     request: Request = None,
 ):
+    require_admin(request)
     user_id = require_user_id(request)
     filename = file.filename
     if not filename or not filename.strip():

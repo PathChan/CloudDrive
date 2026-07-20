@@ -5,8 +5,15 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
-from app.routers import auth, cloud_drive
+from app.routers import auth, cloud_drive, ldap_auth
+# from app.routers import microsoft_auth  # SSO 暂时禁用
 
+# 配置日志：INFO 级别，包含时间、模块、级别、消息
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 logger = logging.getLogger(__name__)
 
 # 后台一致性检查间隔（秒），默认 30 分钟
@@ -56,14 +63,20 @@ def check_connections():
     except Exception as e:
         print(f"[WARN] MinIO connection failed: {e}")
 
+    # Check LDAP
+    if settings.ldap_enabled:
+        from app.routers.ldap_auth import check_ldap_connection
+        check_ldap_connection()
+
 
 def rebuild_cache_if_empty():
-    """启动时检查 Redis 是否已有持久化目录数据，为空则从 DB 全量重建
+    """启动时检查 Redis 是否已有持久化目录数据，为空或无效则从 DB 全量重建
     
-    增强功能：
-    1. 自动检测一致性异常
-    2. 发现异常时自动触发重建
-    3. 记录详细告警日志
+    核心判断标准：fc:0 键是否存在且包含实际内容。
+    这能正确处理以下场景：
+    1. Redis 完全为空 -> 重建
+    2. fc:0 存在但内容为空（旧格式残留或部分写入）-> 重建
+    3. fc:0 存在且有数据但其他键不一致 -> 一致性校验后修复
     """
     from app.services.redis_client import get_redis
     from app.services.drive_service import rebuild_all_cache, verify_cache_consistency
@@ -73,15 +86,20 @@ def rebuild_cache_if_empty():
         logger.warning("Redis 不可用，跳过缓存重建")
         return
 
-    # 检查是否有任何持久化键
-    persist_prefixes = ("fc:", "bc:", "fi:", "fi2:", "fav:", "ts", "trash:")
-    keys = r.keys("*") or []
-    has_persist_data = any(
-        k.startswith(p) for k in keys for p in persist_prefixes
-    )
+    # 检查 fc:0 是否包含有效数据（有实际文件夹或文件条目）
+    fc0_valid = False
+    try:
+        import json as _json
+        fc0_raw = r.get("fc:0")
+        if fc0_raw:
+            fc0_data = _json.loads(fc0_raw)
+            if fc0_data.get("folders") or fc0_data.get("files"):
+                fc0_valid = True
+    except Exception:
+        pass
 
-    if not has_persist_data:
-        logger.info("Redis 持久化目录为空，开始从数据库全量重建...")
+    if not fc0_valid:
+        logger.info("Redis 根目录缓存无效或为空，开始从数据库全量重建...")
         result = rebuild_all_cache()
         if result.get("status") == "ok":
             logger.info(f"Redis 全量重建完成: {result['keys_written']} 个键 ({result['folders']} 文件夹, {result['files']} 文件, {result['users']} 用户)")
@@ -90,7 +108,7 @@ def rebuild_cache_if_empty():
         else:
             logger.error(f"Redis 重建失败: {result.get('error')}")
     else:
-        # 有数据但做快速一致性检查
+        # fc:0 有效，做快速一致性检查
         result = verify_cache_consistency()
         if result.get("status") == "consistent":
             logger.info(f"Redis 持久化目录校验通过: {result['keys_count']} 个键, {result['users']} 个用户")
@@ -207,6 +225,8 @@ app.add_middleware(
 
 app.include_router(auth.router)
 app.include_router(cloud_drive.router)
+# app.include_router(microsoft_auth.router)  # SSO 暂时禁用
+app.include_router(ldap_auth.router)
 
 
 @app.get("/admin/health")
