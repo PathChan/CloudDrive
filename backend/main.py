@@ -196,6 +196,12 @@ async def periodic_cache_consistency_check():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     check_connections()
+
+    # 初始化 LDAP 日志目录（确保 logs/ 在服务启动时就存在）
+    from app.services.ldap_logger import get_ldap_log_writer
+    writer = get_ldap_log_writer()
+    logger.info(f"LDAP 监控日志目录已就绪: {writer.log_dir}")
+
     rebuild_cache_if_empty()
     
     # 启动后台定期一致性检查任务
