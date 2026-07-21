@@ -1,3 +1,4 @@
+import time
 import logging
 import json
 import base64
@@ -8,6 +9,10 @@ from pydantic import BaseModel
 from ldap3 import Server, Connection, ALL, SUBTREE, NTLM, SIMPLE
 from app.config import settings
 from app.services import auth_service
+from app.services.ldap_logger import (
+    LdapPhase, LdapLoginTracer, get_ldap_log_writer,
+    _classify_error, _mask_username,
+)
 from app.utils.jwt_util import create_token
 
 logger = logging.getLogger(__name__)
@@ -34,8 +39,74 @@ def _create_server():
     )
 
 
+def _reverse_group_check(conn, user_dn: str) -> str | None:
+    """反向组查询：直接查两个目标组获取 member 列表，匹配当前用户 DN。
+
+    核心优化（对比旧方案 memberOf 遍历）：
+    - 旧方案：查用户 → 拉取所有 memberOf → 逐个比对 → 数据量大，响应慢
+    - 新方案：查两个目标组 → 只返回 cn + member → 数据量极小，一次查询命中
+    
+    参数:
+        conn: 已绑定的 ldap3 Connection（服务账号）
+        user_dn: 用户的 distinguishedName
+    
+    返回: "admin" | "user" | None
+    """
+    group_base = settings.ldap_group_search_base
+    group_filter = settings.ldap_group_filter
+    admin_cn = (settings.parse_dn_components(settings.ldap_admin_group_dn).get("cn") or "").lower()
+    user_cn = (settings.parse_dn_components(settings.ldap_user_group_dn).get("cn") or "").lower()
+
+    logger.info(
+        f"[LDAP登录] Step3-反向组查询: "
+        f"base={group_base}, filter={group_filter}, "
+        f"checking_user_dn={user_dn[:80]}..., "
+        f"admin_cn={admin_cn}, user_cn={user_cn}"
+    )
+
+    try:
+        conn.search(
+            search_base=group_base,
+            search_filter=group_filter,
+            search_scope=SUBTREE,
+            attributes=["cn", "member"],
+        )
+        result_count = len(conn.entries) if conn.entries else 0
+        logger.info(f"[LDAP登录] Step3-反向组查询完成: groups_found={result_count}")
+    except Exception as e:
+        logger.error(f"[LDAP登录] Step3-反向组查询异常: error={e}")
+        return None
+
+    if not conn.entries:
+        logger.warning(f"[LDAP登录] Step3-反向组查询未找到目标组: filter={group_filter}")
+        return None
+
+    user_dn_lower = user_dn.lower()
+    found_role = None
+
+    for entry in conn.entries:
+        cn = (str(getattr(entry, 'cn', ''))).lower()
+        members = getattr(entry, 'member', []) or []
+        member_count = len(members)
+
+        logger.info(f"[LDAP登录] Step3-检查组: cn={cn}, member_count={member_count}")
+
+        # 检查用户 DN 是否在该组的 member 列表中
+        for member_dn in members:
+            if str(member_dn).lower() == user_dn_lower:
+                if cn == admin_cn:
+                    logger.info(f"[LDAP登录] Step3-用户匹配admin组: cn={cn}")
+                    return "admin"  # admin 优先，立即返回
+                elif cn == user_cn:
+                    found_role = "user"
+                    logger.info(f"[LDAP登录] Step3-用户匹配user组: cn={cn}")
+                break
+
+    return found_role
+
+
 def _check_group(entry, target_group_dn: str) -> bool:
-    """检查用户是否属于指定 group"""
+    """检查用户是否属于指定 group（旧方案，保留兼容）"""
     if not hasattr(entry, settings.ldap_group_attribute):
         return False
     try:
@@ -59,6 +130,16 @@ def check_ldap_connection():
     if not settings.ldap_enabled:
         print(f"[SKIP] LDAP is disabled")
         return
+
+    # -- 解析并输出搜索基 DN 组件 --
+    comps = settings.ldap_search_base_components
+    print(f"[LDAP] Search Base DN: {comps.get('raw') or '(none)'}")
+    if comps["ous"]:
+        print(f"[LDAP]   OU hierarchy: {' -> '.join(comps['ous'])}")
+    if comps["dcs"]:
+        print(f"[LDAP]   DC domain: {'.'.join(comps['dcs'])}")
+    if comps["cn"]:
+        print(f"[LDAP]   CN: {comps['cn']}")
 
     print(f"[LDAP] Checking connection to {settings.ldap_host}:{settings.ldap_port} ...")
 
@@ -165,11 +246,17 @@ def _adsi_ldap_login(username: str, password: str) -> dict | None:
 
     safe_user_group = _ps_escape(settings.ldap_user_group_dn or '')
     safe_admin_group = _ps_escape(settings.ldap_admin_group_dn or '')
+    safe_group_search_base = _ps_escape(settings.ldap_group_search_base or '')
+    safe_group_filter = _ps_escape(settings.ldap_group_filter or '')
+
+    # LDAPS 方案前缀：端口636 + SSL=true 时使用 LDAPS://
+    ldap_scheme = "LDAPS" if (settings.ldap_use_ssl or settings.ldap_port == 636) else "LDAP"
 
     # 构建 PowerShell 脚本
     ps_script = f"""
 $ErrorActionPreference = 'Stop'
 
+$scheme     = '{ldap_scheme}'
 $hostName   = '{safe_host}'
 $bindUser   = '{safe_bind_user}'
 $bindPass   = '{safe_bind_pass}'
@@ -178,14 +265,16 @@ $userFilter = '{safe_user_filter}'
 $username   = '{safe_username}'
 $domainUser = '{domain_user}'
 $password   = '{safe_password}'
-$userGroup  = '{safe_user_group}'
-$adminGroup = '{safe_admin_group}'
+$groupSearchBase = '{safe_group_search_base}'
+$groupFilter     = '{safe_group_filter}'
+$userGroupCN  = {_ps_escape(settings.parse_dn_components(settings.ldap_user_group_dn).get('cn') or '')}
+$adminGroupCN = {_ps_escape(settings.parse_dn_components(settings.ldap_admin_group_dn).get('cn') or '')}
 $emailAttrs = @({', '.join(f"'{a.strip()}'" for a in settings.ldap_email_attribute.split(','))})
 $dispAttrs  = @({', '.join(f"'{a.strip()}'" for a in settings.ldap_display_name_attribute.split(','))})
 
 try {{
-    # Step 1: 用服务账号绑定并搜索用户
-    $rootPath = "LDAP://$hostName/$searchBase"
+    # Step 1: 用服务账号绑定并搜索用户（LDAPS）
+    $rootPath = "$scheme://$hostName:{settings.ldap_port}/$searchBase"
 
     # 创建 DirectoryEntry 但不提前连接，避免连接状态冲突
     $de = New-Object System.DirectoryServices.DirectoryEntry($rootPath, $bindUser, $bindPass)
@@ -200,7 +289,6 @@ try {{
     [void]$searcher.PropertiesToLoad.Add('displayName')
     [void]$searcher.PropertiesToLoad.Add('userPrincipalName')
     [void]$searcher.PropertiesToLoad.Add('distinguishedName')
-    [void]$searcher.PropertiesToLoad.Add('memberOf')
 
     $result = $searcher.FindOne()
     if (-not $result) {{
@@ -210,22 +298,48 @@ try {{
 
     $props = $result.Properties
     $userDN = $props['distinguishedname'][0].ToString()
-    $memberOf = @($props['memberof'] | ForEach-Object {{ $_.ToString() }})
 
-    # Step 2: 检查 group（admin 优先）
-    $role = $null
-    if ($adminGroup -and $memberOf -contains $adminGroup) {{
-        $role = 'admin'
-    }} elseif ($userGroup -and $memberOf -contains $userGroup) {{
-        $role = 'user'
+    # Step 2: 反向组查询 —— 直接查两个目标组获取 member 列表
+    if ($groupSearchBase -and $groupFilter) {{
+        $groupPath = "$scheme://$hostName:{settings.ldap_port}/$groupSearchBase"
+        $groupDe = New-Object System.DirectoryServices.DirectoryEntry($groupPath, $bindUser, $bindPass)
+
+        $groupSearcher = New-Object System.DirectoryServices.DirectorySearcher($groupDe)
+        $groupSearcher.Filter = $groupFilter
+        $groupSearcher.SearchScope = [System.DirectoryServices.SearchScope]::Subtree
+        $groupSearcher.PageSize = 1000
+        $groupSearcher.CacheResults = $false
+        [void]$groupSearcher.PropertiesToLoad.Add('cn')
+        [void]$groupSearcher.PropertiesToLoad.Add('member')
+
+        $role = $null
+        $groupResults = $groupSearcher.FindAll()
+        foreach ($gr in $groupResults) {{
+            $memberList = @($gr.Properties['member'] | ForEach-Object {{ $_.ToString().ToLower() }})
+            $cn = ($gr.Properties['cn'] | Select-Object -First 1) -as [string]
+            if ($memberList -contains $userDN.ToLower()) {{
+                if ($cn -eq $adminGroupCN) {{
+                    $role = 'admin'
+                    break  # admin 优先
+                }} elseif ($cn -eq $userGroupCN) {{
+                    $role = 'user'
+                }}
+            }}
+        }}
+        $groupDe.Dispose()
+
+        if (-not $role) {{
+            Write-Output 'ERROR:NO_GROUP:用户不属于授权组，无权登录'
+            exit 0
+        }}
     }} else {{
-        Write-Output 'ERROR:NO_GROUP:用户不属于授权组，无权登录'
+        Write-Output 'ERROR:NO_GROUP_CONFIG:组查询配置缺失'
         exit 0
     }}
 
     # Step 3: 验证用户密码
     try {{
-        $userPath = "LDAP://$hostName/$userDN"
+        $userPath = "$scheme://$hostName:{settings.ldap_port}/$userDN"
         $userEntry = New-Object DirectoryServices.DirectoryEntry($userPath, $domainUser, $password)
         $null = $userEntry.NativeObject
     }} catch {{
@@ -335,30 +449,41 @@ async def ldap_login(req: LdapLoginRequest):
     username = req.username.strip()
     password = req.password.strip()
 
-    logger.info(f"[LDAP登录] 收到请求: username={username}, host={settings.ldap_host}:{settings.ldap_port}, ssl={settings.ldap_use_ssl}")
+    # 创建登录流程跟踪器（自动记录每个阶段的结构化日志）
+    tracer = LdapLoginTracer(username)
 
     if not username or not password:
+        tracer.log_event(LdapPhase.OVERALL, level="WARNING",
+                         error_code="LDAP_EMPTY_CREDENTIALS",
+                         error_message="用户名或密码为空",
+                         error_category="validation",
+                         result="error")
         logger.warning(f"[LDAP登录] 用户名或密码为空: username={username}")
         return {"error": "用户名和密码不能为空"}
 
     # === Step 1: 创建 LDAP 服务器对象 ===
     try:
-        server = _create_server()
+        with tracer.phase(LdapPhase.CONNECT):
+            server = _create_server()
         logger.info(f"[LDAP登录] Step1-服务器对象创建成功: {settings.ldap_host}:{settings.ldap_port}")
     except Exception as e:
         logger.error(f"[LDAP登录] Step1-创建服务器对象失败: host={settings.ldap_host}, error={e}")
+        tracer.set_result("error", {"failed_at": "CONNECT", "reason": str(e)})
         return {"error": f"LDAP 服务器配置错误: {e}"}
 
     # === Step 2: 服务账号 NTLM 绑定 + 搜索用户 ===
     conn = None
+    bind_exception = None
     try:
         logger.info(f"[LDAP登录] Step2-开始服务账号NTLM绑定: bind_user={settings.ldap_bind_user}")
-        conn = Connection(server, user=settings.ldap_bind_user,
-                          password=settings.ldap_bind_password,
-                          authentication=NTLM, auto_bind=True)
+        with tracer.phase(LdapPhase.SERVICE_BIND):
+            conn = Connection(server, user=settings.ldap_bind_user,
+                              password=settings.ldap_bind_password,
+                              authentication=NTLM, auto_bind=True)
         logger.info(f"[LDAP登录] Step2-服务账号NTLM绑定成功: {conn.bound}")
 
     except Exception as e:
+        bind_exception = e
         logger.error(f"[LDAP登录] Step2-服务账号绑定失败: host={settings.ldap_host}, bind_user={settings.ldap_bind_user}, error_type={type(e).__name__}, error={e}")
         if conn:
             try:
@@ -370,44 +495,158 @@ async def ldap_login(req: LdapLoginRequest):
         error_str = str(e).lower()
         if any(kw in error_str for kw in ('invalid server address', 'socket', 'dns', 'getaddrinfo', 'unreachable', 'timeout')):
             logger.info(f"[LDAP登录] ldap3 连接失败，尝试 ADSI 后备...")
+
+            # ADSI 后备有独立的 tracer
+            adsi_start = time.time()
             adsi_result = _try_adsi_fallback(username, password)
+            adsi_duration = (time.time() - adsi_start) * 1000
+
             if adsi_result:
                 email, display_name, role = adsi_result
+                tracer.log_event(
+                    LdapPhase.ADSI_FALLBACK,
+                    level="INFO",
+                    error_code="LDAP_PHASE_OK",
+                    error_message="ADSI后备认证成功",
+                    error_category="success",
+                    duration_ms=adsi_duration,
+                    result="ok",
+                    details={"role": role},
+                )
                 logger.info(f"[LDAP登录-ADSI] 后备认证成功: username={username}, role={role}")
-                return _issue_jwt(email, display_name, username, role)
+                return _issue_jwt_with_tracer(tracer, email, display_name, username, role)
             else:
+                tracer.log_event(
+                    LdapPhase.ADSI_FALLBACK,
+                    level="ERROR",
+                    error_code="LDAP_ADSI_POWERSHELL_ERROR",
+                    error_message="ADSI后备认证也失败",
+                    error_category="system",
+                    duration_ms=adsi_duration,
+                    result="error",
+                )
                 logger.error(f"[LDAP登录-ADSI] 后备认证也失败了")
+                tracer.set_result("error", {"failed_at": "ADSI_FALLBACK", "reason": str(e)[:200]})
                 return {"error": "LDAP 服务器连接失败，请检查网络或联系管理员"}
+
+        tracer.set_result("error", {"failed_at": "SERVICE_BIND", "reason": str(e)[:200]})
         return {"error": "LDAP 服务器连接失败，请检查网络或联系管理员"}
 
     # 搜索用户
+    search_base = settings.build_user_search_base()
     search_filter = settings.ldap_user_filter.format(username=username)
-    logger.info(f"[LDAP登录] Step2-搜索用户: base={settings.ldap_user_search_base}, filter={search_filter}")
+
+    # 解析并输出搜索基 DN 的组件，便于排查搜索范围问题
+    search_comps = settings.parse_dn_components(search_base)
+    logger.info(
+        f"[LDAP登录] Step2-搜索用户: "
+        f"base={search_base}, "
+        f"filter={search_filter}, "
+        f"OUs={search_comps.get('ous', [])}, "
+        f"DCs={search_comps.get('dcs', [])}"
+    )
 
     entry = None
     user_dn = None
     search_error = None
+    result_count = 0
     try:
-        conn.search(
-            search_base=settings.ldap_user_search_base,
-            search_filter=search_filter,
-            search_scope=SUBTREE,
-            attributes=[
-                "mail", "displayName", "userPrincipalName",
-                "sAMAccountName", "distinguishedName",
-                settings.ldap_group_attribute,
-            ],
+        with tracer.phase(LdapPhase.SEARCH):
+            conn.search(
+                search_base=search_base,
+                search_filter=search_filter,
+                search_scope=SUBTREE,
+                attributes=[
+                    "mail", "displayName", "userPrincipalName",
+                    "sAMAccountName", "distinguishedName",
+                    settings.ldap_group_attribute,
+                ],
+            )
+            result_count = len(conn.entries) if conn.entries else 0
+        logger.info(
+            f"[LDAP登录] Step2-搜索完成: results={result_count}, "
+            f"result_code={conn.result.get('result') if conn.result else 'N/A'}, "
+            f"description={conn.result.get('description', 'N/A') if conn.result else 'N/A'}"
         )
-        result_count = len(conn.entries) if conn.entries else 0
-        logger.info(f"[LDAP登录] Step2-搜索完成: 结果数={result_count}, result_code={conn.result.get('result') if conn.result else 'N/A'}")
 
         if conn.entries:
+            if result_count > 1:
+                logger.warning(
+                    f"[LDAP登录] Step2-搜索返回多条结果 ({result_count})，取第一条。"
+                    f"考虑缩小 search_base 范围。"
+                )
+                tracer.log_event(
+                    LdapPhase.SEARCH,
+                    level="WARNING",
+                    error_code="LDAP_SEARCH_TOO_MANY_RESULTS",
+                    error_message=f"搜索返回 {result_count} 条结果，取第一条",
+                    error_category="search",
+                    result="warning",
+                    details={"result_count": result_count, "search_base": search_base},
+                )
             entry = conn.entries[0]
             user_dn = str(entry.entry_dn)
             logger.info(f"[LDAP登录] Step2-找到用户: dn={user_dn}")
     except Exception as e:
         search_error = str(e)
-        logger.error(f"[LDAP登录] Step2-搜索异常: username={username}, base={settings.ldap_user_search_base}, error_type={type(e).__name__}, error={e}")
+        logger.error(
+            f"[LDAP登录] Step2-搜索异常: "
+            f"username={username}, base={search_base}, "
+            f"error_type={type(e).__name__}, error={e}"
+        )
+
+    if search_error:
+        tracer.set_result("error", {"failed_at": "SEARCH", "reason": search_error[:200]})
+        return {"error": f"LDAP 用户搜索失败: {search_error}"}
+
+    if not entry or not user_dn:
+        tracer.log_event(
+            LdapPhase.SEARCH,
+            level="WARNING",
+            error_code="LDAP_SEARCH_NO_RESULTS",
+            error_message="未找到匹配用户",
+            error_category="search",
+            result="not_found",
+        )
+        tracer.set_result("error", {"failed_at": "SEARCH", "reason": "user_not_found"})
+        logger.warning(f"[LDAP登录] Step2-用户不存在: username={username}, filter={search_filter}")
+        return {"error": "用户不存在或无权登录"}
+
+    # === Step 3: 反向组查询（直接查目标组 member 列表，无需遍历用户 memberOf）===
+    gc_start = time.time()
+    role = _reverse_group_check(conn, user_dn)
+    gc_duration = (time.time() - gc_start) * 1000
+
+    if role is None:
+        tracer.log_event(
+            LdapPhase.GROUP_CHECK,
+            level="ERROR",
+            error_code="LDAP_GROUP_NOT_FOUND",
+            error_message="用户不属于任何授权组（反向组查询未匹配）",
+            error_category="auth",
+            duration_ms=gc_duration,
+            result="error",
+            details={
+                "user_dn_masked": _mask_username(user_dn.split(",")[0].replace("CN=", "")) if user_dn else "N/A",
+                "group_search_base": settings.ldap_group_search_base,
+                "group_filter": settings.ldap_group_filter,
+            },
+        )
+        tracer.set_result("error", {"failed_at": "GROUP_CHECK"})
+        logger.warning(f"[LDAP登录] Step3-用户不属于任何授权组: username={username}")
+        return {"error": "用户不属于授权组，无权登录"}
+
+    tracer.log_event(
+        LdapPhase.GROUP_CHECK,
+        level="INFO",
+        error_code="LDAP_PHASE_OK",
+        error_message=f"反向组查询通过: {role}",
+        error_category="success",
+        duration_ms=gc_duration,
+        result="ok",
+        details={"role": role, "query_method": "reverse_group_lookup"},
+    )
+    logger.info(f"[LDAP登录] Step3-反向组查询完成: role={role}, duration={gc_duration:.0f}ms")
 
     # 关闭服务账号连接
     try:
@@ -416,37 +655,9 @@ async def ldap_login(req: LdapLoginRequest):
     except Exception as e:
         logger.warning(f"[LDAP登录] Step2-关闭服务账号连接异常: {e}")
 
-    if search_error:
-        return {"error": f"LDAP 用户搜索失败: {search_error}"}
-
-    if not entry or not user_dn:
-        logger.warning(f"[LDAP登录] Step2-用户不存在: username={username}, filter={search_filter}")
-        return {"error": "用户不存在或无权登录"}
-
-    # === Step 3: 检查 group 成员（先在 user 组找，再到 admin 组找）===
-    role = None
-    group_attr = settings.ldap_group_attribute
-    try:
-        groups_raw = getattr(entry, group_attr) if hasattr(entry, group_attr) else []
-        group_list = [str(g) for g in (groups_raw or [])]
-        logger.info(f"[LDAP登录] Step3-用户组成员: username={username}, groups={group_list}")
-    except Exception as e:
-        logger.warning(f"[LDAP登录] Step3-读取组属性异常: username={username}, attr={group_attr}, error={e}")
-        group_list = []
-
-    # admin 优先：如果在两个组中，admin 优先
-    if settings.ldap_admin_group_dn and _check_group(entry, settings.ldap_admin_group_dn):
-        role = "admin"
-        logger.info(f"[LDAP登录] Step3-用户属于admin组: username={username}, group={settings.ldap_admin_group_dn}")
-    elif settings.ldap_user_group_dn and _check_group(entry, settings.ldap_user_group_dn):
-        role = "user"
-        logger.info(f"[LDAP登录] Step3-用户属于user组: username={username}, group={settings.ldap_user_group_dn}")
-    else:
-        logger.warning(f"[LDAP登录] Step3-用户不属于任何授权组: username={username}, user_groups={group_list}, user_group_dn={settings.ldap_user_group_dn}, admin_group_dn={settings.ldap_admin_group_dn}")
-        return {"error": "用户不属于授权组，无权登录"}
-
-    # === Step 4: 用户密码验证（显式 bind + 返回值检查）===
+    # === Step 4: 用户密码验证 ===
     user_conn = None
+    bind_failed = False
     try:
         logger.info(f"[LDAP登录] Step4-开始密码验证: username={username}, user_dn={user_dn}")
         user_conn = Connection(
@@ -457,25 +668,44 @@ async def ldap_login(req: LdapLoginRequest):
             auto_bind=False,
             raise_exceptions=False,
         )
-        open_ok = user_conn.open()
-        logger.info(f"[LDAP登录] Step4-连接打开: open_result={open_ok}")
+        open_ok = False
+        with tracer.phase(LdapPhase.USER_BIND):
+            open_ok = user_conn.open()
+            logger.info(f"[LDAP登录] Step4-连接打开: open_result={open_ok}")
 
-        if not open_ok:
-            logger.error(f"[LDAP登录] Step4-连接打开失败: username={username}, result={user_conn.result}")
-            return {"error": "LDAP 连接失败，请稍后重试"}
+            if not open_ok:
+                logger.error(f"[LDAP登录] Step4-连接打开失败: username={username}, result={user_conn.result}")
+                bind_failed = True
+            else:
+                bind_ok = user_conn.bind()
+                bind_result = user_conn.result
+                logger.info(f"[LDAP登录] Step4-绑定结果: bind_ok={bind_ok}, result_code={bind_result.get('result') if bind_result else 'N/A'}")
+                if not bind_ok:
+                    logger.warning(f"[LDAP登录] Step4-密码错误: username={username}, user_dn={user_dn}")
+                    bind_failed = True
 
-        bind_ok = user_conn.bind()
-        bind_result = user_conn.result
-        logger.info(f"[LDAP登录] Step4-绑定结果: bind_ok={bind_ok}, result_code={bind_result.get('result') if bind_result else 'N/A'}, description={bind_result.get('description') if bind_result else 'N/A'}")
-
-        if not bind_ok:
-            logger.warning(f"[LDAP登录] Step4-密码错误: username={username}, user_dn={user_dn}, result={bind_result}")
+        if bind_failed:
+            # 根据 LDAP result code 细化错误分类
+            if user_conn and user_conn.result:
+                ldap_code = user_conn.result.get("result", -1)
+                ldap_desc = user_conn.result.get("description", "")
+                tracer.log_event(
+                    LdapPhase.USER_BIND,
+                    level="ERROR",
+                    error_code=_get_ldap_bind_error_code(ldap_code, ldap_desc),
+                    error_message=f"LDAP code={ldap_code}: {ldap_desc}",
+                    error_category="bind",
+                    result="error",
+                    details={"ldap_result_code": ldap_code, "ldap_description": ldap_desc},
+                )
+            tracer.set_result("error", {"failed_at": "USER_BIND"})
             return {"error": "密码错误"}
 
         logger.info(f"[LDAP登录] Step4-密码验证通过: username={username}")
 
     except Exception as e:
         logger.error(f"[LDAP登录] Step4-密码验证异常: username={username}, error_type={type(e).__name__}, error={e}")
+        tracer.set_result("error", {"failed_at": "USER_BIND", "reason": str(e)[:200]})
         return {"error": "密码错误"}
     finally:
         if user_conn:
@@ -486,6 +716,7 @@ async def ldap_login(req: LdapLoginRequest):
                 logger.warning(f"[LDAP登录] Step4-关闭用户连接异常: {e}")
 
     # === Step 5: 提取用户信息 ===
+    ie_start = time.time()
     email = ""
     email_source = "default"
     try:
@@ -500,7 +731,6 @@ async def ldap_login(req: LdapLoginRequest):
         logger.warning(f"[LDAP登录] Step5-提取邮箱异常: {e}")
     if not email:
         email = f"{username}@corp.novocorp.net"
-    logger.info(f"[LDAP登录] Step5-用户邮箱: email={email}, source={email_source}")
 
     display_name = ""
     display_source = "default"
@@ -516,13 +746,93 @@ async def ldap_login(req: LdapLoginRequest):
         logger.warning(f"[LDAP登录] Step5-提取显示名异常: {e}")
     if not display_name:
         display_name = username
+
+    ie_duration = (time.time() - ie_start) * 1000
+    tracer.log_event(
+        LdapPhase.INFO_EXTRACT,
+        level="INFO",
+        error_code="LDAP_PHASE_OK",
+        error_message="用户信息提取完成",
+        error_category="success",
+        duration_ms=ie_duration,
+        result="ok",
+        details={
+            "email_source": email_source,
+            "display_source": display_source,
+            "email_masked": _mask_username(email.split("@")[0]) + "@" + email.split("@")[-1] if "@" in email else "***",
+        },
+    )
+    logger.info(f"[LDAP登录] Step5-用户邮箱: email={email}, source={email_source}")
     logger.info(f"[LDAP登录] Step5-用户显示名: display_name={display_name}, source={display_source}")
 
-    return _issue_jwt(email, display_name, username, role)
+    return _issue_jwt_with_tracer(tracer, email, display_name, username, role)
+
+
+def _get_ldap_bind_error_code(ldap_code: int, ldap_desc: str) -> str:
+    """根据 LDAP result code 返回结构化错误码"""
+    desc_lower = ldap_desc.lower()
+    code_map = {
+        49: {
+            "locked": "LDAP_USER_ACCOUNT_LOCKED",
+            "disabled": "LDAP_USER_ACCOUNT_DISABLED",
+            "expired": "LDAP_USER_ACCOUNT_EXPIRED",
+            "password expired": "LDAP_USER_PASSWORD_EXPIRED",
+            "must change": "LDAP_USER_MUST_CHANGE_PASSWORD",
+            "logon hours": "LDAP_USER_LOGIN_HOURS",
+            "default": "LDAP_USER_WRONG_PASSWORD",
+        },
+        52: "LDAP_SERVER_UNAVAILABLE",
+        53: "LDAP_SERVER_UNAVAILABLE",
+        80: "LDAP_SERVER_UNAVAILABLE",
+        85: "LDAP_SEARCH_TIMEOUT",
+    }
+    if ldap_code in code_map:
+        if isinstance(code_map[ldap_code], dict):
+            for keyword, error_code in code_map[ldap_code].items():
+                if keyword in desc_lower:
+                    return error_code
+            return code_map[ldap_code]["default"]
+        return code_map[ldap_code]
+    return "LDAP_USER_WRONG_PASSWORD"
+
+
+def _issue_jwt_with_tracer(tracer: LdapLoginTracer, email: str, display_name: str, username: str, role: str):
+    """签发 JWT 令牌（带 trace 记录）"""
+    try:
+        with tracer.phase(LdapPhase.JWT_ISSUE):
+            user = auth_service.find_or_create_user(email=email, username=display_name)
+        logger.info(f"[LDAP登录] Step6-本地用户: id={user['id']}, username={user['username']}, email={user['email']}")
+    except Exception as e:
+        logger.error(f"[LDAP登录] Step6-创建/查找本地用户失败: error={e}")
+        tracer.set_result("error", {"failed_at": "JWT_ISSUE", "reason": str(e)[:200]})
+        return {"error": f"用户信息同步失败: {e}"}
+
+    try:
+        token = create_token(user_id=user["id"], username=user["username"], role=role)
+        logger.info(f"[LDAP登录] Step6-JWT签发成功: user_id={user['id']}, role={role}")
+    except Exception as e:
+        logger.error(f"[LDAP登录] Step6-JWT签发失败: error={e}")
+        tracer.set_result("error", {"failed_at": "JWT_ISSUE", "reason": str(e)[:200]})
+        return {"error": "登录凭证生成失败"}
+
+    tracer.set_result("success", details={
+        "user_id": user["id"],
+        "role": role,
+    })
+    logger.info(f"[LDAP登录] ===== 登录成功: username={username}, role={role}, email={email} =====")
+    return {
+        "token": token,
+        "user": {
+            "id": user["id"],
+            "username": user["username"] or display_name or username,
+            "email": user["email"],
+            "role": role,
+        },
+    }
 
 
 def _issue_jwt(email: str, display_name: str, username: str, role: str):
-    """签发 JWT 令牌"""
+    """签发 JWT 令牌（向后兼容，无 tracer）"""
     try:
         user = auth_service.find_or_create_user(email=email, username=display_name)
         logger.info(f"[LDAP登录] Step6-本地用户: id={user['id']}, username={user['username']}, email={user['email']}")
